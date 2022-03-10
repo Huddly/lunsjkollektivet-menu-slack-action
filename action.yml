@@ -1,0 +1,21 @@
+name: Lunsjkollektivet menu slack action
+description: Posts todays menu from Lunsjkollektivet to a Slack channel
+inputs:
+    slack_token:
+        description: >
+            Slack token for the bot.
+        required: true
+    slack_channel:
+        description: >
+            Slack channel to post to.
+        required: true
+    slack_author:
+        description: >
+            Slack author name.
+        required: true
+runs:
+    using: node12
+    main: dist/index.js
+branding:
+    icon: sunrise
+    color: yellow
