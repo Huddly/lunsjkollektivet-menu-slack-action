@@ -2212,7 +2212,7 @@ function assembleMenuMessage(menu) {
 		elements: [
 			{
 				type: 'mrkdwn',
-				text: '*Not coming to the office in the ner future? Update your lunch here:*\nhttps://www.lunsjkollektivet.no/minlunsj',
+				text: '*Not coming to the office in the near future? Update your lunch here:*\nhttps://www.lunsjkollektivet.no/minlunsj',
 			},
 		],
 	};
@@ -2232,12 +2232,7 @@ function assembleMenuMessage(menu) {
 async function sendSlackMessage(token, channel, author, blocks) {
 	const payload = {
 		channel,
-		attachments: [
-			{
-				color: '#ad5763',
-				blocks,
-			},
-		],
+		attachments: [{ blocks }],
 	};
 
 	try {
@@ -2367,6 +2362,7 @@ async function main() {
 		 */
 		core.startGroup('Started assembling message');
 		const blocks = assembleMenuMessage(menu);
+		console.log(blocks);
 		core.info('Assembled message');
 		core.info(JSON.stringify(blocks, null, 2));
 		await sendSlackMessage(slackToken, slackChannel, slackAuthor, blocks);

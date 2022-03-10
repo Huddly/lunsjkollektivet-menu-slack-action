@@ -1,8 +1,8 @@
 # Lunsjkollektivet menu slack action
 
-![1f62944861b7fadfed6c17dd3201fd01](https://user-images.githubusercontent.com/25268506/157645913-0016b497-6213-4d84-8007-1456d21a32e3.png)
-
 Posts todays menu from Lunsjkollektivet to a Slack channel
+
+![Message example](https://user-images.githubusercontent.com/25268506/157645913-0016b497-6213-4d84-8007-1456d21a32e3.png)
 
 ## Example GitHub Action workflow
 
