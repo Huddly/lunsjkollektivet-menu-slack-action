@@ -2193,7 +2193,7 @@ function assembleMenuMessage(menu) {
 		type: 'header',
 		text: {
 			type: 'plain_text',
-			text: `${greeting}\nHere\'s your menu for today:`,
+			text: `${greeting}\nHere\'s today\'s menu:`,
 		},
 	};
 
