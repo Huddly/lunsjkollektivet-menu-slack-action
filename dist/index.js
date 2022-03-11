@@ -592,7 +592,7 @@ module.exports = function httpAdapter(config) {
 
 const fetch = __webpack_require__(467);
 const { translateString } = __webpack_require__(279);
-const { nextBusinessDay, stripEndingNewlineBreaks } = __webpack_require__(918);
+const { getNextBusinessDay, stripEndingNewlineBreaks } = __webpack_require__(918);
 
 /**
  * Get todays menu from Lunsjkollektivet
@@ -600,7 +600,7 @@ const { nextBusinessDay, stripEndingNewlineBreaks } = __webpack_require__(918);
  * @returns {Promise<array>}
  */
 async function getLunsjkollektivetMenu() {
-	const { date } = nextBusinessDay();
+	const { date } = getNextBusinessDay();
 	const source = `https://api.lunsjkollektivet.no/menus?startDate=${date}&endDate=${date}`;
 	const res = await fetch(source);
 
@@ -13568,7 +13568,7 @@ try{
 
 const core = __webpack_require__(186);
 const fetch = __webpack_require__(467);
-const { nextBusinessDay, getGreeting } = __webpack_require__(918);
+const { getNextBusinessDay, getGreeting } = __webpack_require__(918);
 
 /**
  * Takes a list of objects and returns an array of blocks for Slack API.
@@ -13578,7 +13578,7 @@ const { nextBusinessDay, getGreeting } = __webpack_require__(918);
  */
 function assembleMenuMessage(menu) {
 	const greeting = getGreeting();
-	const { day } = nextBusinessDay();
+	const { day } = getNextBusinessDay();
 
 	const headerBlock = {
 		type: 'header',
@@ -15342,13 +15342,13 @@ function plural(ms, msAbs, n, name) {
 /***/ (function(module) {
 
 /**
- * Get the next business day and date in an object.
+ * Get the next business day and date as an object.
  * The day is returned as a string and date as a YYYY-MM-DD.
- * Skips the weekend.
+ * Skips the weekends.
  *
  * @returns  {Object}
  */
-function nextBusinessDay() {
+function getNextBusinessDay() {
 	const date = new Date(Date.now() + 24 * 60 * 60 * 1000);
 	const day = date.getDay();
 	const dayOffset = day === 0 ? 1 : day === 6 ? 2 : day;
@@ -15389,7 +15389,7 @@ function getGreeting() {
 	return greetings[rand];
 }
 
-module.exports = { nextBusinessDay, stripEndingNewlineBreaks, getGreeting };
+module.exports = { getNextBusinessDay, stripEndingNewlineBreaks, getGreeting };
 
 
 /***/ }),
