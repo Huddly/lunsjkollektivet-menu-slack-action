@@ -78,12 +78,16 @@ async function getLunsjkollektivetMenu() {
 
 	const json = await res.json();
 
-	return json.map(({ type, meal }) => {
+	const menu = json.map(({ type, meal }) => {
 		return {
 			type: type.name,
 			description: stripEndingNewlineBreaks(meal.description),
 		};
 	});
+	// Sort menu alphabetically by menu.type
+	menu.sort((a, b) => a.type.localeCompare(b.type));
+
+	return menu;
 }
 
 module.exports = { getLunsjkollektivetMenu };
@@ -2437,7 +2441,13 @@ function stripEndingNewlineBreaks(str) {
  * @returns {String}
  */
 function getGreeting() {
-	const greetings = ['Good morning', 'Get ready for lunch', 'Lunch time!', "Hope you're hungry", 'Time for lunch'];
+	const greetings = [
+		'Good morning!',
+		'Get ready for lunch!',
+		'Lunch time!',
+		"Hope you're hungry!",
+		'Time for lunch!',
+	];
 	const rand = Math.floor(Math.random() * greetings.length);
 	return greetings[rand];
 }
