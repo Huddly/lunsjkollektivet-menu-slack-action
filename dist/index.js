@@ -13603,7 +13603,7 @@ function assembleMenuMessage(menu) {
 		elements: [
 			{
 				type: 'mrkdwn',
-				text: '*Not coming to the office in the near future? Update your lunch here:*\nhttps://www.lunsjkollektivet.no/minlunsj',
+				text: `*Not coming to the office on ${day}? Update your lunch here:*\nhttps://www.lunsjkollektivet.no/minlunsj`,
 			},
 		],
 	};
