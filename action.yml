@@ -1,5 +1,5 @@
 name: Lunsjkollektivet menu slack action
-description: Posts todays menu from Lunsjkollektivet to a Slack channel
+description: Posts the next working day's menu from Lunsjkollektivet to a Slack channel
 inputs:
     slack_webhook:
         description: >

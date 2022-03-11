@@ -1,8 +1,8 @@
 # Lunsjkollektivet menu slack action
 
-Posts todays menu from Lunsjkollektivet to a Slack channel
+Posts the next working day's menu from Lunsjkollektivet to a Slack channel
 
-![Message example](https://user-images.githubusercontent.com/25268506/157835353-cfb71d8d-e98e-49ca-92bf-6947ba989836.png)
+![Message example](https://user-images.githubusercontent.com/25268506/157867346-5eaa135e-a746-46ec-896b-c64fd34cdbcf.png)
 
 ## Example GitHub Action workflow
 
@@ -11,11 +11,11 @@ name: Post Lunsjkollektivet menu to Slack
 
 on:
     schedule:
-        - cron: '30 9 * * MON' # Monday at 9:30am UTC
-        - cron: '30 9 * * TUE' # Tuesday at 9:30am UTC
-        - cron: '30 9 * * WED' # Wednesday at 9:30am UTC
-        - cron: '30 9 * * THU' # Thursday at 9:30am UTC
-        - cron: '30 9 * * FRI' # Friday at 9:30am UTC
+        - cron: '0 9 * * MON' # Monday at 9:00am UTC
+        - cron: '0 9 * * TUE' # Tuesday at 9:00am UTC
+        - cron: '0 9 * * WED' # Wednesday at 9:00am UTC
+        - cron: '0 9 * * THU' # Thursday at 9:00am UTC
+        - cron: '0 9 * * FRI' # Friday at 9:00am UTC
 
 jobs:
     replicate_changes:
