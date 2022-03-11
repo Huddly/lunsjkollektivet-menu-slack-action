@@ -2,7 +2,7 @@
 
 Posts todays menu from Lunsjkollektivet to a Slack channel
 
-![Message example](https://user-images.githubusercontent.com/25268506/157645913-0016b497-6213-4d84-8007-1456d21a32e3.png)
+![Message example](https://user-images.githubusercontent.com/25268506/157835353-cfb71d8d-e98e-49ca-92bf-6947ba989836.png)
 
 ## Example GitHub Action workflow
 
@@ -24,15 +24,15 @@ jobs:
             - name: Post Lunsjkollektivet menu to Slack
               uses: huddly/lunsjkollektivet-menu-slack-action@master
               with:
-                  slack_token: ${{ secrets.SLACK_TOKEN }}
-                  slack_channel: food
-                  slack_author: Lunsjkollektivet bot
+                  slack_webhook: ${{ secrets.slack_webhook }}
+                  slack_channel: '#food'
+                  slack_author: 'Lunsjkollektivet Chef'
 ```
 
 ## Configuration
 
-| Name            | Descripion               | Required |
-| --------------- | ------------------------ | -------- |
-| `slack_token`   | Slack token for the bot  | true     |
-| `slack_channel` | Slack channel to post to | true     |
-| `slack_author`  | Slack author name        | true     |
+| Name            | Descripion                                                                                   | Required |
+| --------------- | -------------------------------------------------------------------------------------------- | -------- |
+| `slack_webhook` | [Slack webhook URL](https://huddly.slack.com/apps/A0F7XDUAZ-incoming-webhooks?tab=more_info) | true     |
+| `slack_channel` | Slack channel to post to.                                                                    | true     |
+| `slack_author`  | Slack author name.                                                                           | true     |

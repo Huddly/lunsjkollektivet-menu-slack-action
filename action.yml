@@ -1,9 +1,9 @@
 name: Lunsjkollektivet menu slack action
 description: Posts todays menu from Lunsjkollektivet to a Slack channel
 inputs:
-    slack_token:
+    slack_webhook:
         description: >
-            Slack token for the bot.
+            Slack webhook URL.
         required: true
     slack_channel:
         description: >

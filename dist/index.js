@@ -2177,6 +2177,7 @@ exports.FetchError = FetchError;
 /***/ 568:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
+const core = __webpack_require__(186);
 const fetch = __webpack_require__(467);
 const { getGreeting } = __webpack_require__(918);
 
@@ -2217,32 +2218,36 @@ function assembleMenuMessage(menu) {
 		],
 	};
 
-	return [headerBlock, ...menuBlocks, footerBlock];
+	const blocks = [headerBlock, ...menuBlocks, footerBlock];
+	core.debug(JSON.stringify(blocks, null, 2));
+
+	return blocks;
 }
 
 /**
  * Sends a message to Slack.
  *
- * @param {String} token
+ * @param {String} webhook
  * @param {String} channel
- * @param {String} author
+ * @param {String} username
  * @param {Array} blocks
  * @returns {Promise<void>}
  */
-async function sendSlackMessage(token, channel, author, blocks) {
+async function sendSlackMessage(webhook, channel, username, blocks) {
 	const payload = {
 		channel,
+		username,
+		icon_emoji: ':green_salad:',
 		attachments: [{ blocks }],
 	};
 
 	try {
-		await fetch('https://slack.com/api/chat.postMessage', {
+		await fetch(webhook, {
 			method: 'POST',
 			body: JSON.stringify(payload),
 			headers: {
 				'Content-Type': 'application/json; charset=utf-8',
 				'Content-Length': payload.length,
-				Authorization: `Bearer ${token}`,
 				Accept: 'application/json',
 			},
 		});
@@ -2345,7 +2350,7 @@ async function main() {
 	try {
 		// Action inputs
 		// Required
-		const slackToken = core.getInput('slack_token', { required: true });
+		const slackWebhook = core.getInput('slack_webhook', { required: true });
 		const slackChannel = core.getInput('slack_channel', { required: true });
 		const slackAuthor = core.getInput('slack_author', { required: true });
 
@@ -2355,6 +2360,11 @@ async function main() {
 		core.startGroup('Started initialization');
 		core.info('Getting menu from Lunsjkollektivet');
 		const menu = await getLunsjkollektivetMenu();
+		if (menu.length === 0) {
+			core.info('No menu found');
+			core.setFailed('No menu found');
+			return;
+		}
 		core.endGroup();
 
 		/**
@@ -2364,8 +2374,7 @@ async function main() {
 		const blocks = assembleMenuMessage(menu);
 		console.log(blocks);
 		core.info('Assembled message');
-		core.info(JSON.stringify(blocks, null, 2));
-		await sendSlackMessage(slackToken, slackChannel, slackAuthor, blocks);
+		await sendSlackMessage(slackWebhook, slackChannel, slackAuthor, blocks);
 		core.info(`Sent message to Slack channel #${slackChannel}`);
 		core.endGroup();
 	} catch (error) {
