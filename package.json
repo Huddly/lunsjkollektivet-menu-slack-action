@@ -30,7 +30,9 @@
 	"dependencies": {
 		"@actions/core": "^1.2.6",
 		"@actions/github": "^4.0.0",
+		"@translate-tools/core": "^0.2.6",
 		"debug": "^4.3.1",
+		"dotenv": "^16.0.0",
 		"node-fetch": "^2.6.1"
 	},
 	"devDependencies": {
