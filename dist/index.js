@@ -14936,7 +14936,7 @@ async function main() {
 		console.log(blocks);
 		core.info('Assembled message');
 		await sendSlackMessage(slackWebhook, slackChannel, slackAuthor, blocks);
-		core.info(`Sent message to Slack channel #${slackChannel}`);
+		core.info(`Sent message to Slack channel ${slackChannel}`);
 		core.endGroup();
 	} catch (error) {
 		core.setFailed(`Action failed because of: ${error}`);
