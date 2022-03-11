@@ -11,8 +11,11 @@ name: Post Lunsjkollektivet menu to Slack
 
 on:
     schedule:
-        # Runs monday-friday at 9:30am UTC
-        - cron: '0 30 9 * * 1-5'
+        - cron: '30 9 * * MON' # Monday at 9:30am UTC
+        - cron: '30 9 * * TUE' # Tuesday at 9:30am UTC
+        - cron: '30 9 * * WED' # Wednesday at 9:30am UTC
+        - cron: '30 9 * * THU' # Thursday at 9:30am UTC
+        - cron: '30 9 * * FRI' # Friday at 9:30am UTC
 
 jobs:
     replicate_changes:
