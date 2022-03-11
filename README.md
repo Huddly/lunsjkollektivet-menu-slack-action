@@ -24,7 +24,7 @@ jobs:
             - name: Post Lunsjkollektivet menu to Slack
               uses: huddly/lunsjkollektivet-menu-slack-action@master
               with:
-                  slack_webhook: ${{ secrets.slack_webhook }}
+                  slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
                   slack_channel: '#food'
                   slack_author: 'Lunsjkollektivet Chef'
 ```
