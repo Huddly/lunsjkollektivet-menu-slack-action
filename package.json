@@ -5,13 +5,8 @@
 	"main": "lib/index.js",
 	"scripts": {
 		"start": "node lib/index.js",
-		"dev": "DEBUG=simple-git npm start",
 		"package": "ncc build lib/index.js -o dist",
-		"gitAdd": "git add dist/index.js",
-		"gen-readme-toc": "markdown-toc -i README.md",
-		"lint": "eslint --max-warnings 0 .",
-		"lint-fix": "eslint --fix .",
-		"test": "npm run lint && jest"
+		"gitAdd": "git add dist/index.js"
 	},
 	"pre-commit": [
 		"package",
@@ -29,18 +24,12 @@
 	"homepage": "https://github.com/huddly/lunsjkollektivet-menu-slack-action#readme",
 	"dependencies": {
 		"@actions/core": "^1.2.6",
-		"@actions/github": "^4.0.0",
 		"@translate-tools/core": "^0.2.6",
-		"debug": "^4.3.1",
 		"dotenv": "^16.0.0",
-		"node-fetch": "^2.6.1"
+		"node-fetch": "^2.6.7"
 	},
 	"devDependencies": {
 		"@vercel/ncc": "^0.23.0",
-		"eslint": "^7.7.0",
-		"eslint-plugin-jest": "^23.20.0",
-		"eslint-plugin-sonarjs": "^0.5.0",
-		"jest": "^26.4.1",
 		"pre-commit": "^1.2.2"
 	}
 }
