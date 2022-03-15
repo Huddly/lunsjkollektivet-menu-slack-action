@@ -34,8 +34,9 @@ jobs:
 
 ## Configuration
 
-| Name            | Descripion                                                                                   | Required |
-| --------------- | -------------------------------------------------------------------------------------------- | -------- |
-| `slack_webhook` | [Slack webhook URL](https://huddly.slack.com/apps/A0F7XDUAZ-incoming-webhooks?tab=more_info) | true     |
-| `slack_channel` | Slack channel to post to.                                                                    | true     |
-| `slack_author`  | Slack author name.                                                                           | true     |
+| Name                         | Descripion                                                                                   | Required |
+| ---------------------------- | -------------------------------------------------------------------------------------------- | -------- |
+| `slack_webhook`              | [Slack webhook URL](https://huddly.slack.com/apps/A0F7XDUAZ-incoming-webhooks?tab=more_info) | true     |
+| `slack_channel`              | Slack channel to post to.                                                                    | true     |
+| `slack_author`               | Slack author name.                                                                           | true     |
+| `slack_skip_sending_message` | Set to true to skip sending the message to Slack. Used for testing.                          | false    |

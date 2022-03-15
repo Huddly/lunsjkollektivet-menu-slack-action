@@ -13,6 +13,10 @@ inputs:
         description: >
             Slack author name.
         required: true
+    slack_skip_sending_message:
+        description: >
+            Set to true to skip sending the message to Slack. Used for testing.
+        required: false
 runs:
     using: node12
     main: dist/index.js

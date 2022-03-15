@@ -14910,10 +14910,10 @@ const { assembleMenuMessage, sendSlackMessage } = __webpack_require__(568);
 async function main() {
 	try {
 		// Action inputs
-		// Required
 		const slackWebhook = core.getInput('slack_webhook', { required: true });
 		const slackChannel = core.getInput('slack_channel', { required: true });
 		const slackAuthor = core.getInput('slack_author', { required: true });
+		const skipSendingMessage = core.getInput('slack_skip_sending_message');
 
 		/**
 		 * Get the menu from Lunsjkollektivet
@@ -14932,10 +14932,11 @@ async function main() {
 		 */
 		core.startGroup('Started assembling message');
 		const blocks = assembleMenuMessage(menu);
-		console.log(blocks);
 		core.info('Assembled message');
-		await sendSlackMessage(slackWebhook, slackChannel, slackAuthor, blocks);
-		core.info(`Sent message to Slack channel ${slackChannel}`);
+		if (!skipSendingMessage) {
+			await sendSlackMessage(slackWebhook, slackChannel, slackAuthor, blocks);
+			core.info(`Sent message to Slack channel ${slackChannel}`);
+		}
 		core.endGroup();
 	} catch (error) {
 		core.setFailed(`Action failed because of: ${error}`);
@@ -15350,7 +15351,13 @@ function plural(ms, msAbs, n, name) {
 function getNextBusinessDay() {
 	const date = new Date(Date.now() + 24 * 60 * 60 * 1000);
 	const day = date.getDay();
-	const dayOffset = day === 0 ? 1 : day === 6 ? 2 : day;
+	// Set offsets to skip weekends
+	let dayOffset = 0;
+	if (day === 0) {
+		dayOffset = 1;
+	} else if (day === 6) {
+		dayOffset = 2;
+	}
 	date.setDate(date.getDate() + dayOffset);
 	return {
 		day: date.toLocaleDateString('en-US', { weekday: 'long' }),
@@ -15380,9 +15387,9 @@ function getGreeting() {
 	const greetings = [
 		'Good morning!',
 		'Get ready for lunch!',
-		'Lunch time!',
+		'Almost lunsh time!',
 		"Hope you're hungry!",
-		'Time for lunch!',
+		'Almost time for lunch!',
 	];
 	const rand = Math.floor(Math.random() * greetings.length);
 	return greetings[rand];
