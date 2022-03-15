@@ -13609,6 +13609,7 @@ function assembleMenuMessage(menu) {
 	};
 
 	const blocks = [headerBlock, ...menuBlocks, footerBlock];
+	core.info('Assembled message');
 	core.debug(JSON.stringify(blocks, null, 2));
 
 	return blocks;
@@ -14913,7 +14914,7 @@ async function main() {
 		const slackWebhook = core.getInput('slack_webhook', { required: true });
 		const slackChannel = core.getInput('slack_channel', { required: true });
 		const slackAuthor = core.getInput('slack_author', { required: true });
-		const skipSendingMessage = core.getInput('slack_skip_sending_message');
+		const skipSendingMessage = core.getInput('slack_skip_sending_message') == 'true';
 
 		/**
 		 * Get the menu from Lunsjkollektivet
@@ -14932,8 +14933,9 @@ async function main() {
 		 */
 		core.startGroup('Started assembling message');
 		const blocks = assembleMenuMessage(menu);
-		core.info('Assembled message');
-		if (!skipSendingMessage) {
+		if (skipSendingMessage) {
+			core.info('Skipping sending message');
+		} else {
 			await sendSlackMessage(slackWebhook, slackChannel, slackAuthor, blocks);
 			core.info(`Sent message to Slack channel ${slackChannel}`);
 		}
