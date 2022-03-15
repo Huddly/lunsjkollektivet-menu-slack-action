@@ -15387,7 +15387,7 @@ function getGreeting() {
 	const greetings = [
 		'Good morning!',
 		'Get ready for lunch!',
-		'Almost lunsh time!',
+		'Almost lunch time!',
 		"Hope you're hungry!",
 		'Almost time for lunch!',
 	];
