@@ -4527,14 +4527,14 @@ const { GoogleTranslator } = __webpack_require__(353);
 const translator = new GoogleTranslator();
 
 async function translateString(string) {
-	let output = '';
+	let output = [string];
 
 	try {
-		output = await translator.translate(string, 'no', 'en');
+		output = await translator.translateBatch([string], 'nb', 'en');
 	} catch (error) {
 		console.error('Translations failed', error);
 	}
-	return output;
+	return output[0];
 }
 
 module.exports = { translateString };
