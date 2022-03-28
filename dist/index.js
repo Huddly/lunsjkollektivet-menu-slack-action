@@ -153,6 +153,663 @@ module.exports = function isCancel(value) {
 
 /***/ }),
 
+/***/ 58:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+var NAMESPACE = __webpack_require__(756).NAMESPACE;
+
+//[4]   	NameStartChar	   ::=   	":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D] | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
+//[4a]   	NameChar	   ::=   	NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
+//[5]   	Name	   ::=   	NameStartChar (NameChar)*
+var nameStartChar = /[A-Z_a-z\xC0-\xD6\xD8-\xF6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]///\u10000-\uEFFFF
+var nameChar = new RegExp("[\\-\\.0-9"+nameStartChar.source.slice(1,-1)+"\\u00B7\\u0300-\\u036F\\u203F-\\u2040]");
+var tagNamePattern = new RegExp('^'+nameStartChar.source+nameChar.source+'*(?:\:'+nameStartChar.source+nameChar.source+'*)?$');
+//var tagNamePattern = /^[a-zA-Z_][\w\-\.]*(?:\:[a-zA-Z_][\w\-\.]*)?$/
+//var handlers = 'resolveEntity,getExternalSubset,characters,endDocument,endElement,endPrefixMapping,ignorableWhitespace,processingInstruction,setDocumentLocator,skippedEntity,startDocument,startElement,startPrefixMapping,notationDecl,unparsedEntityDecl,error,fatalError,warning,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,comment,endCDATA,endDTD,endEntity,startCDATA,startDTD,startEntity'.split(',')
+
+//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
+//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
+var S_TAG = 0;//tag name offerring
+var S_ATTR = 1;//attr name offerring
+var S_ATTR_SPACE=2;//attr name end and space offer
+var S_EQ = 3;//=space?
+var S_ATTR_NOQUOT_VALUE = 4;//attr value(no quot value only)
+var S_ATTR_END = 5;//attr value end and no space(quot end)
+var S_TAG_SPACE = 6;//(attr value end || tag end ) && (space offer)
+var S_TAG_CLOSE = 7;//closed el<el />
+
+/**
+ * Creates an error that will not be caught by XMLReader aka the SAX parser.
+ *
+ * @param {string} message
+ * @param {any?} locator Optional, can provide details about the location in the source
+ * @constructor
+ */
+function ParseError(message, locator) {
+	this.message = message
+	this.locator = locator
+	if(Error.captureStackTrace) Error.captureStackTrace(this, ParseError);
+}
+ParseError.prototype = new Error();
+ParseError.prototype.name = ParseError.name
+
+function XMLReader(){
+
+}
+
+XMLReader.prototype = {
+	parse:function(source,defaultNSMap,entityMap){
+		var domBuilder = this.domBuilder;
+		domBuilder.startDocument();
+		_copy(defaultNSMap ,defaultNSMap = {})
+		parse(source,defaultNSMap,entityMap,
+				domBuilder,this.errorHandler);
+		domBuilder.endDocument();
+	}
+}
+function parse(source,defaultNSMapCopy,entityMap,domBuilder,errorHandler){
+	function fixedFromCharCode(code) {
+		// String.prototype.fromCharCode does not supports
+		// > 2 bytes unicode chars directly
+		if (code > 0xffff) {
+			code -= 0x10000;
+			var surrogate1 = 0xd800 + (code >> 10)
+				, surrogate2 = 0xdc00 + (code & 0x3ff);
+
+			return String.fromCharCode(surrogate1, surrogate2);
+		} else {
+			return String.fromCharCode(code);
+		}
+	}
+	function entityReplacer(a){
+		var k = a.slice(1,-1);
+		if (Object.hasOwnProperty.call(entityMap, k)) {
+			return entityMap[k];
+		}else if(k.charAt(0) === '#'){
+			return fixedFromCharCode(parseInt(k.substr(1).replace('x','0x')))
+		}else{
+			errorHandler.error('entity not found:'+a);
+			return a;
+		}
+	}
+	function appendText(end){//has some bugs
+		if(end>start){
+			var xt = source.substring(start,end).replace(/&#?\w+;/g,entityReplacer);
+			locator&&position(start);
+			domBuilder.characters(xt,0,end-start);
+			start = end
+		}
+	}
+	function position(p,m){
+		while(p>=lineEnd && (m = linePattern.exec(source))){
+			lineStart = m.index;
+			lineEnd = lineStart + m[0].length;
+			locator.lineNumber++;
+			//console.log('line++:',locator,startPos,endPos)
+		}
+		locator.columnNumber = p-lineStart+1;
+	}
+	var lineStart = 0;
+	var lineEnd = 0;
+	var linePattern = /.*(?:\r\n?|\n)|.*$/g
+	var locator = domBuilder.locator;
+
+	var parseStack = [{currentNSMap:defaultNSMapCopy}]
+	var closeMap = {};
+	var start = 0;
+	while(true){
+		try{
+			var tagStart = source.indexOf('<',start);
+			if(tagStart<0){
+				if(!source.substr(start).match(/^\s*$/)){
+					var doc = domBuilder.doc;
+	    			var text = doc.createTextNode(source.substr(start));
+	    			doc.appendChild(text);
+	    			domBuilder.currentElement = text;
+				}
+				return;
+			}
+			if(tagStart>start){
+				appendText(tagStart);
+			}
+			switch(source.charAt(tagStart+1)){
+			case '/':
+				var end = source.indexOf('>',tagStart+3);
+				var tagName = source.substring(tagStart + 2, end).replace(/[ \t\n\r]+$/g, '');
+				var config = parseStack.pop();
+				if(end<0){
+
+	        		tagName = source.substring(tagStart+2).replace(/[\s<].*/,'');
+	        		errorHandler.error("end tag name: "+tagName+' is not complete:'+config.tagName);
+	        		end = tagStart+1+tagName.length;
+	        	}else if(tagName.match(/\s</)){
+	        		tagName = tagName.replace(/[\s<].*/,'');
+	        		errorHandler.error("end tag name: "+tagName+' maybe not complete');
+	        		end = tagStart+1+tagName.length;
+				}
+				var localNSMap = config.localNSMap;
+				var endMatch = config.tagName == tagName;
+				var endIgnoreCaseMach = endMatch || config.tagName&&config.tagName.toLowerCase() == tagName.toLowerCase()
+		        if(endIgnoreCaseMach){
+		        	domBuilder.endElement(config.uri,config.localName,tagName);
+					if(localNSMap){
+						for(var prefix in localNSMap){
+							domBuilder.endPrefixMapping(prefix) ;
+						}
+					}
+					if(!endMatch){
+		            	errorHandler.fatalError("end tag name: "+tagName+' is not match the current start tagName:'+config.tagName ); // No known test case
+					}
+		        }else{
+		        	parseStack.push(config)
+		        }
+
+				end++;
+				break;
+				// end elment
+			case '?':// <?...?>
+				locator&&position(tagStart);
+				end = parseInstruction(source,tagStart,domBuilder);
+				break;
+			case '!':// <!doctype,<![CDATA,<!--
+				locator&&position(tagStart);
+				end = parseDCC(source,tagStart,domBuilder,errorHandler);
+				break;
+			default:
+				locator&&position(tagStart);
+				var el = new ElementAttributes();
+				var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
+				//elStartEnd
+				var end = parseElementStartPart(source,tagStart,el,currentNSMap,entityReplacer,errorHandler);
+				var len = el.length;
+
+
+				if(!el.closed && fixSelfClosed(source,end,el.tagName,closeMap)){
+					el.closed = true;
+					if(!entityMap.nbsp){
+						errorHandler.warning('unclosed xml attribute');
+					}
+				}
+				if(locator && len){
+					var locator2 = copyLocator(locator,{});
+					//try{//attribute position fixed
+					for(var i = 0;i<len;i++){
+						var a = el[i];
+						position(a.offset);
+						a.locator = copyLocator(locator,{});
+					}
+					domBuilder.locator = locator2
+					if(appendElement(el,domBuilder,currentNSMap)){
+						parseStack.push(el)
+					}
+					domBuilder.locator = locator;
+				}else{
+					if(appendElement(el,domBuilder,currentNSMap)){
+						parseStack.push(el)
+					}
+				}
+
+				if (NAMESPACE.isHTML(el.uri) && !el.closed) {
+					end = parseHtmlSpecialContent(source,end,el.tagName,entityReplacer,domBuilder)
+				} else {
+					end++;
+				}
+			}
+		}catch(e){
+			if (e instanceof ParseError) {
+				throw e;
+			}
+			errorHandler.error('element parse error: '+e)
+			end = -1;
+		}
+		if(end>start){
+			start = end;
+		}else{
+			//TODO: 这里有可能sax回退，有位置错误风险
+			appendText(Math.max(tagStart,start)+1);
+		}
+	}
+}
+function copyLocator(f,t){
+	t.lineNumber = f.lineNumber;
+	t.columnNumber = f.columnNumber;
+	return t;
+}
+
+/**
+ * @see #appendElement(source,elStartEnd,el,selfClosed,entityReplacer,domBuilder,parseStack);
+ * @return end of the elementStartPart(end of elementEndPart for selfClosed el)
+ */
+function parseElementStartPart(source,start,el,currentNSMap,entityReplacer,errorHandler){
+
+	/**
+	 * @param {string} qname
+	 * @param {string} value
+	 * @param {number} startIndex
+	 */
+	function addAttribute(qname, value, startIndex) {
+		if (el.attributeNames.hasOwnProperty(qname)) {
+			errorHandler.fatalError('Attribute ' + qname + ' redefined')
+		}
+		el.addValue(
+			qname,
+			// @see https://www.w3.org/TR/xml/#AVNormalize
+			// since the xmldom sax parser does not "interpret" DTD the following is not implemented:
+			// - recursive replacement of (DTD) entity references
+			// - trimming and collapsing multiple spaces into a single one for attributes that are not of type CDATA
+			value.replace(/[\t\n\r]/g, ' ').replace(/&#?\w+;/g, entityReplacer),
+			startIndex
+		)
+	}
+	var attrName;
+	var value;
+	var p = ++start;
+	var s = S_TAG;//status
+	while(true){
+		var c = source.charAt(p);
+		switch(c){
+		case '=':
+			if(s === S_ATTR){//attrName
+				attrName = source.slice(start,p);
+				s = S_EQ;
+			}else if(s === S_ATTR_SPACE){
+				s = S_EQ;
+			}else{
+				//fatalError: equal must after attrName or space after attrName
+				throw new Error('attribute equal must after attrName'); // No known test case
+			}
+			break;
+		case '\'':
+		case '"':
+			if(s === S_EQ || s === S_ATTR //|| s == S_ATTR_SPACE
+				){//equal
+				if(s === S_ATTR){
+					errorHandler.warning('attribute value must after "="')
+					attrName = source.slice(start,p)
+				}
+				start = p+1;
+				p = source.indexOf(c,start)
+				if(p>0){
+					value = source.slice(start, p);
+					addAttribute(attrName, value, start-1);
+					s = S_ATTR_END;
+				}else{
+					//fatalError: no end quot match
+					throw new Error('attribute value no end \''+c+'\' match');
+				}
+			}else if(s == S_ATTR_NOQUOT_VALUE){
+				value = source.slice(start, p);
+				addAttribute(attrName, value, start);
+				errorHandler.warning('attribute "'+attrName+'" missed start quot('+c+')!!');
+				start = p+1;
+				s = S_ATTR_END
+			}else{
+				//fatalError: no equal before
+				throw new Error('attribute value must after "="'); // No known test case
+			}
+			break;
+		case '/':
+			switch(s){
+			case S_TAG:
+				el.setTagName(source.slice(start,p));
+			case S_ATTR_END:
+			case S_TAG_SPACE:
+			case S_TAG_CLOSE:
+				s =S_TAG_CLOSE;
+				el.closed = true;
+			case S_ATTR_NOQUOT_VALUE:
+			case S_ATTR:
+			case S_ATTR_SPACE:
+				break;
+			//case S_EQ:
+			default:
+				throw new Error("attribute invalid close char('/')") // No known test case
+			}
+			break;
+		case ''://end document
+			errorHandler.error('unexpected end of input');
+			if(s == S_TAG){
+				el.setTagName(source.slice(start,p));
+			}
+			return p;
+		case '>':
+			switch(s){
+			case S_TAG:
+				el.setTagName(source.slice(start,p));
+			case S_ATTR_END:
+			case S_TAG_SPACE:
+			case S_TAG_CLOSE:
+				break;//normal
+			case S_ATTR_NOQUOT_VALUE://Compatible state
+			case S_ATTR:
+				value = source.slice(start,p);
+				if(value.slice(-1) === '/'){
+					el.closed  = true;
+					value = value.slice(0,-1)
+				}
+			case S_ATTR_SPACE:
+				if(s === S_ATTR_SPACE){
+					value = attrName;
+				}
+				if(s == S_ATTR_NOQUOT_VALUE){
+					errorHandler.warning('attribute "'+value+'" missed quot(")!');
+					addAttribute(attrName, value, start)
+				}else{
+					if(!NAMESPACE.isHTML(currentNSMap['']) || !value.match(/^(?:disabled|checked|selected)$/i)){
+						errorHandler.warning('attribute "'+value+'" missed value!! "'+value+'" instead!!')
+					}
+					addAttribute(value, value, start)
+				}
+				break;
+			case S_EQ:
+				throw new Error('attribute value missed!!');
+			}
+//			console.log(tagName,tagNamePattern,tagNamePattern.test(tagName))
+			return p;
+		/*xml space '\x20' | #x9 | #xD | #xA; */
+		case '\u0080':
+			c = ' ';
+		default:
+			if(c<= ' '){//space
+				switch(s){
+				case S_TAG:
+					el.setTagName(source.slice(start,p));//tagName
+					s = S_TAG_SPACE;
+					break;
+				case S_ATTR:
+					attrName = source.slice(start,p)
+					s = S_ATTR_SPACE;
+					break;
+				case S_ATTR_NOQUOT_VALUE:
+					var value = source.slice(start, p);
+					errorHandler.warning('attribute "'+value+'" missed quot(")!!');
+					addAttribute(attrName, value, start)
+				case S_ATTR_END:
+					s = S_TAG_SPACE;
+					break;
+				//case S_TAG_SPACE:
+				//case S_EQ:
+				//case S_ATTR_SPACE:
+				//	void();break;
+				//case S_TAG_CLOSE:
+					//ignore warning
+				}
+			}else{//not space
+//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
+//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
+				switch(s){
+				//case S_TAG:void();break;
+				//case S_ATTR:void();break;
+				//case S_ATTR_NOQUOT_VALUE:void();break;
+				case S_ATTR_SPACE:
+					var tagName =  el.tagName;
+					if (!NAMESPACE.isHTML(currentNSMap['']) || !attrName.match(/^(?:disabled|checked|selected)$/i)) {
+						errorHandler.warning('attribute "'+attrName+'" missed value!! "'+attrName+'" instead2!!')
+					}
+					addAttribute(attrName, attrName, start);
+					start = p;
+					s = S_ATTR;
+					break;
+				case S_ATTR_END:
+					errorHandler.warning('attribute space is required"'+attrName+'"!!')
+				case S_TAG_SPACE:
+					s = S_ATTR;
+					start = p;
+					break;
+				case S_EQ:
+					s = S_ATTR_NOQUOT_VALUE;
+					start = p;
+					break;
+				case S_TAG_CLOSE:
+					throw new Error("elements closed character '/' and '>' must be connected to");
+				}
+			}
+		}//end outer switch
+		//console.log('p++',p)
+		p++;
+	}
+}
+/**
+ * @return true if has new namespace define
+ */
+function appendElement(el,domBuilder,currentNSMap){
+	var tagName = el.tagName;
+	var localNSMap = null;
+	//var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
+	var i = el.length;
+	while(i--){
+		var a = el[i];
+		var qName = a.qName;
+		var value = a.value;
+		var nsp = qName.indexOf(':');
+		if(nsp>0){
+			var prefix = a.prefix = qName.slice(0,nsp);
+			var localName = qName.slice(nsp+1);
+			var nsPrefix = prefix === 'xmlns' && localName
+		}else{
+			localName = qName;
+			prefix = null
+			nsPrefix = qName === 'xmlns' && ''
+		}
+		//can not set prefix,because prefix !== ''
+		a.localName = localName ;
+		//prefix == null for no ns prefix attribute
+		if(nsPrefix !== false){//hack!!
+			if(localNSMap == null){
+				localNSMap = {}
+				//console.log(currentNSMap,0)
+				_copy(currentNSMap,currentNSMap={})
+				//console.log(currentNSMap,1)
+			}
+			currentNSMap[nsPrefix] = localNSMap[nsPrefix] = value;
+			a.uri = NAMESPACE.XMLNS
+			domBuilder.startPrefixMapping(nsPrefix, value)
+		}
+	}
+	var i = el.length;
+	while(i--){
+		a = el[i];
+		var prefix = a.prefix;
+		if(prefix){//no prefix attribute has no namespace
+			if(prefix === 'xml'){
+				a.uri = NAMESPACE.XML;
+			}if(prefix !== 'xmlns'){
+				a.uri = currentNSMap[prefix || '']
+
+				//{console.log('###'+a.qName,domBuilder.locator.systemId+'',currentNSMap,a.uri)}
+			}
+		}
+	}
+	var nsp = tagName.indexOf(':');
+	if(nsp>0){
+		prefix = el.prefix = tagName.slice(0,nsp);
+		localName = el.localName = tagName.slice(nsp+1);
+	}else{
+		prefix = null;//important!!
+		localName = el.localName = tagName;
+	}
+	//no prefix element has default namespace
+	var ns = el.uri = currentNSMap[prefix || ''];
+	domBuilder.startElement(ns,localName,tagName,el);
+	//endPrefixMapping and startPrefixMapping have not any help for dom builder
+	//localNSMap = null
+	if(el.closed){
+		domBuilder.endElement(ns,localName,tagName);
+		if(localNSMap){
+			for(prefix in localNSMap){
+				domBuilder.endPrefixMapping(prefix)
+			}
+		}
+	}else{
+		el.currentNSMap = currentNSMap;
+		el.localNSMap = localNSMap;
+		//parseStack.push(el);
+		return true;
+	}
+}
+function parseHtmlSpecialContent(source,elStartEnd,tagName,entityReplacer,domBuilder){
+	if(/^(?:script|textarea)$/i.test(tagName)){
+		var elEndStart =  source.indexOf('</'+tagName+'>',elStartEnd);
+		var text = source.substring(elStartEnd+1,elEndStart);
+		if(/[&<]/.test(text)){
+			if(/^script$/i.test(tagName)){
+				//if(!/\]\]>/.test(text)){
+					//lexHandler.startCDATA();
+					domBuilder.characters(text,0,text.length);
+					//lexHandler.endCDATA();
+					return elEndStart;
+				//}
+			}//}else{//text area
+				text = text.replace(/&#?\w+;/g,entityReplacer);
+				domBuilder.characters(text,0,text.length);
+				return elEndStart;
+			//}
+
+		}
+	}
+	return elStartEnd+1;
+}
+function fixSelfClosed(source,elStartEnd,tagName,closeMap){
+	//if(tagName in closeMap){
+	var pos = closeMap[tagName];
+	if(pos == null){
+		//console.log(tagName)
+		pos =  source.lastIndexOf('</'+tagName+'>')
+		if(pos<elStartEnd){//忘记闭合
+			pos = source.lastIndexOf('</'+tagName)
+		}
+		closeMap[tagName] =pos
+	}
+	return pos<elStartEnd;
+	//}
+}
+function _copy(source,target){
+	for(var n in source){target[n] = source[n]}
+}
+function parseDCC(source,start,domBuilder,errorHandler){//sure start with '<!'
+	var next= source.charAt(start+2)
+	switch(next){
+	case '-':
+		if(source.charAt(start + 3) === '-'){
+			var end = source.indexOf('-->',start+4);
+			//append comment source.substring(4,end)//<!--
+			if(end>start){
+				domBuilder.comment(source,start+4,end-start-4);
+				return end+3;
+			}else{
+				errorHandler.error("Unclosed comment");
+				return -1;
+			}
+		}else{
+			//error
+			return -1;
+		}
+	default:
+		if(source.substr(start+3,6) == 'CDATA['){
+			var end = source.indexOf(']]>',start+9);
+			domBuilder.startCDATA();
+			domBuilder.characters(source,start+9,end-start-9);
+			domBuilder.endCDATA()
+			return end+3;
+		}
+		//<!DOCTYPE
+		//startDTD(java.lang.String name, java.lang.String publicId, java.lang.String systemId)
+		var matchs = split(source,start);
+		var len = matchs.length;
+		if(len>1 && /!doctype/i.test(matchs[0][0])){
+			var name = matchs[1][0];
+			var pubid = false;
+			var sysid = false;
+			if(len>3){
+				if(/^public$/i.test(matchs[2][0])){
+					pubid = matchs[3][0];
+					sysid = len>4 && matchs[4][0];
+				}else if(/^system$/i.test(matchs[2][0])){
+					sysid = matchs[3][0];
+				}
+			}
+			var lastMatch = matchs[len-1]
+			domBuilder.startDTD(name, pubid, sysid);
+			domBuilder.endDTD();
+
+			return lastMatch.index+lastMatch[0].length
+		}
+	}
+	return -1;
+}
+
+
+
+function parseInstruction(source,start,domBuilder){
+	var end = source.indexOf('?>',start);
+	if(end){
+		var match = source.substring(start,end).match(/^<\?(\S*)\s*([\s\S]*?)\s*$/);
+		if(match){
+			var len = match[0].length;
+			domBuilder.processingInstruction(match[1], match[2]) ;
+			return end+2;
+		}else{//error
+			return -1;
+		}
+	}
+	return -1;
+}
+
+function ElementAttributes(){
+	this.attributeNames = {}
+}
+ElementAttributes.prototype = {
+	setTagName:function(tagName){
+		if(!tagNamePattern.test(tagName)){
+			throw new Error('invalid tagName:'+tagName)
+		}
+		this.tagName = tagName
+	},
+	addValue:function(qName, value, offset) {
+		if(!tagNamePattern.test(qName)){
+			throw new Error('invalid attribute:'+qName)
+		}
+		this.attributeNames[qName] = this.length;
+		this[this.length++] = {qName:qName,value:value,offset:offset}
+	},
+	length:0,
+	getLocalName:function(i){return this[i].localName},
+	getLocator:function(i){return this[i].locator},
+	getQName:function(i){return this[i].qName},
+	getURI:function(i){return this[i].uri},
+	getValue:function(i){return this[i].value}
+//	,getIndex:function(uri, localName)){
+//		if(localName){
+//
+//		}else{
+//			var qName = uri
+//		}
+//	},
+//	getValue:function(){return this.getValue(this.getIndex.apply(this,arguments))},
+//	getType:function(uri,localName){}
+//	getType:function(i){},
+}
+
+
+
+function split(source,start){
+	var match;
+	var buf = [];
+	var reg = /'[^']+'|"[^"]+"|[^\s<>\/=]+=?|(\/?\s*>|<)/g;
+	reg.lastIndex = start;
+	reg.exec(source);//skip <
+	while(match = reg.exec(source)){
+		buf.push(match);
+		if(match[1])return buf;
+	}
+}
+
+exports.XMLReader = XMLReader;
+exports.ParseError = ParseError;
+
+
+/***/ }),
+
 /***/ 62:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -296,6 +953,335 @@ module.exports = function settle(resolve, reject, response) {
     ));
   }
 };
+
+
+/***/ }),
+
+/***/ 72:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+var conventions = __webpack_require__(756);
+var dom = __webpack_require__(389)
+var entities = __webpack_require__(508);
+var sax = __webpack_require__(58);
+
+var DOMImplementation = dom.DOMImplementation;
+
+var NAMESPACE = conventions.NAMESPACE;
+
+var ParseError = sax.ParseError;
+var XMLReader = sax.XMLReader;
+
+/**
+ * Normalizes line ending according to https://www.w3.org/TR/xml11/#sec-line-ends:
+ *
+ * > XML parsed entities are often stored in computer files which,
+ * > for editing convenience, are organized into lines.
+ * > These lines are typically separated by some combination
+ * > of the characters CARRIAGE RETURN (#xD) and LINE FEED (#xA).
+ * >
+ * > To simplify the tasks of applications, the XML processor must behave
+ * > as if it normalized all line breaks in external parsed entities (including the document entity)
+ * > on input, before parsing, by translating all of the following to a single #xA character:
+ * >
+ * > 1. the two-character sequence #xD #xA
+ * > 2. the two-character sequence #xD #x85
+ * > 3. the single character #x85
+ * > 4. the single character #x2028
+ * > 5. any #xD character that is not immediately followed by #xA or #x85.
+ *
+ * @param {string} input
+ * @returns {string}
+ */
+function normalizeLineEndings(input) {
+	return input
+		.replace(/\r[\n\u0085]/g, '\n')
+		.replace(/[\r\u0085\u2028]/g, '\n')
+}
+
+/**
+ * @typedef Locator
+ * @property {number} [columnNumber]
+ * @property {number} [lineNumber]
+ */
+
+/**
+ * @typedef DOMParserOptions
+ * @property {DOMHandler} [domBuilder]
+ * @property {Function} [errorHandler]
+ * @property {(string) => string} [normalizeLineEndings] used to replace line endings before parsing
+ * 						defaults to `normalizeLineEndings`
+ * @property {Locator} [locator]
+ * @property {Record<string, string>} [xmlns]
+ *
+ * @see normalizeLineEndings
+ */
+
+/**
+ * The DOMParser interface provides the ability to parse XML or HTML source code
+ * from a string into a DOM `Document`.
+ *
+ * _xmldom is different from the spec in that it allows an `options` parameter,
+ * to override the default behavior._
+ *
+ * @param {DOMParserOptions} [options]
+ * @constructor
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMParser
+ * @see https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-parsing-and-serialization
+ */
+function DOMParser(options){
+	this.options = options ||{locator:{}};
+}
+
+DOMParser.prototype.parseFromString = function(source,mimeType){
+	var options = this.options;
+	var sax =  new XMLReader();
+	var domBuilder = options.domBuilder || new DOMHandler();//contentHandler and LexicalHandler
+	var errorHandler = options.errorHandler;
+	var locator = options.locator;
+	var defaultNSMap = options.xmlns||{};
+	var isHTML = /\/x?html?$/.test(mimeType);//mimeType.toLowerCase().indexOf('html') > -1;
+  	var entityMap = isHTML ? entities.HTML_ENTITIES : entities.XML_ENTITIES;
+	if(locator){
+		domBuilder.setDocumentLocator(locator)
+	}
+
+	sax.errorHandler = buildErrorHandler(errorHandler,domBuilder,locator);
+	sax.domBuilder = options.domBuilder || domBuilder;
+	if(isHTML){
+		defaultNSMap[''] = NAMESPACE.HTML;
+	}
+	defaultNSMap.xml = defaultNSMap.xml || NAMESPACE.XML;
+	var normalize = options.normalizeLineEndings || normalizeLineEndings;
+	if (source && typeof source === 'string') {
+		sax.parse(
+			normalize(source),
+			defaultNSMap,
+			entityMap
+		)
+	} else {
+		sax.errorHandler.error('invalid doc source')
+	}
+	return domBuilder.doc;
+}
+function buildErrorHandler(errorImpl,domBuilder,locator){
+	if(!errorImpl){
+		if(domBuilder instanceof DOMHandler){
+			return domBuilder;
+		}
+		errorImpl = domBuilder ;
+	}
+	var errorHandler = {}
+	var isCallback = errorImpl instanceof Function;
+	locator = locator||{}
+	function build(key){
+		var fn = errorImpl[key];
+		if(!fn && isCallback){
+			fn = errorImpl.length == 2?function(msg){errorImpl(key,msg)}:errorImpl;
+		}
+		errorHandler[key] = fn && function(msg){
+			fn('[xmldom '+key+']\t'+msg+_locator(locator));
+		}||function(){};
+	}
+	build('warning');
+	build('error');
+	build('fatalError');
+	return errorHandler;
+}
+
+//console.log('#\n\n\n\n\n\n\n####')
+/**
+ * +ContentHandler+ErrorHandler
+ * +LexicalHandler+EntityResolver2
+ * -DeclHandler-DTDHandler
+ *
+ * DefaultHandler:EntityResolver, DTDHandler, ContentHandler, ErrorHandler
+ * DefaultHandler2:DefaultHandler,LexicalHandler, DeclHandler, EntityResolver2
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/helpers/DefaultHandler.html
+ */
+function DOMHandler() {
+    this.cdata = false;
+}
+function position(locator,node){
+	node.lineNumber = locator.lineNumber;
+	node.columnNumber = locator.columnNumber;
+}
+/**
+ * @see org.xml.sax.ContentHandler#startDocument
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ContentHandler.html
+ */
+DOMHandler.prototype = {
+	startDocument : function() {
+    	this.doc = new DOMImplementation().createDocument(null, null, null);
+    	if (this.locator) {
+        	this.doc.documentURI = this.locator.systemId;
+    	}
+	},
+	startElement:function(namespaceURI, localName, qName, attrs) {
+		var doc = this.doc;
+	    var el = doc.createElementNS(namespaceURI, qName||localName);
+	    var len = attrs.length;
+	    appendElement(this, el);
+	    this.currentElement = el;
+
+		this.locator && position(this.locator,el)
+	    for (var i = 0 ; i < len; i++) {
+	        var namespaceURI = attrs.getURI(i);
+	        var value = attrs.getValue(i);
+	        var qName = attrs.getQName(i);
+			var attr = doc.createAttributeNS(namespaceURI, qName);
+			this.locator &&position(attrs.getLocator(i),attr);
+			attr.value = attr.nodeValue = value;
+			el.setAttributeNode(attr)
+	    }
+	},
+	endElement:function(namespaceURI, localName, qName) {
+		var current = this.currentElement
+		var tagName = current.tagName;
+		this.currentElement = current.parentNode;
+	},
+	startPrefixMapping:function(prefix, uri) {
+	},
+	endPrefixMapping:function(prefix) {
+	},
+	processingInstruction:function(target, data) {
+	    var ins = this.doc.createProcessingInstruction(target, data);
+	    this.locator && position(this.locator,ins)
+	    appendElement(this, ins);
+	},
+	ignorableWhitespace:function(ch, start, length) {
+	},
+	characters:function(chars, start, length) {
+		chars = _toString.apply(this,arguments)
+		//console.log(chars)
+		if(chars){
+			if (this.cdata) {
+				var charNode = this.doc.createCDATASection(chars);
+			} else {
+				var charNode = this.doc.createTextNode(chars);
+			}
+			if(this.currentElement){
+				this.currentElement.appendChild(charNode);
+			}else if(/^\s*$/.test(chars)){
+				this.doc.appendChild(charNode);
+				//process xml
+			}
+			this.locator && position(this.locator,charNode)
+		}
+	},
+	skippedEntity:function(name) {
+	},
+	endDocument:function() {
+		this.doc.normalize();
+	},
+	setDocumentLocator:function (locator) {
+	    if(this.locator = locator){// && !('lineNumber' in locator)){
+	    	locator.lineNumber = 0;
+	    }
+	},
+	//LexicalHandler
+	comment:function(chars, start, length) {
+		chars = _toString.apply(this,arguments)
+	    var comm = this.doc.createComment(chars);
+	    this.locator && position(this.locator,comm)
+	    appendElement(this, comm);
+	},
+
+	startCDATA:function() {
+	    //used in characters() methods
+	    this.cdata = true;
+	},
+	endCDATA:function() {
+	    this.cdata = false;
+	},
+
+	startDTD:function(name, publicId, systemId) {
+		var impl = this.doc.implementation;
+	    if (impl && impl.createDocumentType) {
+	        var dt = impl.createDocumentType(name, publicId, systemId);
+	        this.locator && position(this.locator,dt)
+	        appendElement(this, dt);
+					this.doc.doctype = dt;
+	    }
+	},
+	/**
+	 * @see org.xml.sax.ErrorHandler
+	 * @link http://www.saxproject.org/apidoc/org/xml/sax/ErrorHandler.html
+	 */
+	warning:function(error) {
+		console.warn('[xmldom warning]\t'+error,_locator(this.locator));
+	},
+	error:function(error) {
+		console.error('[xmldom error]\t'+error,_locator(this.locator));
+	},
+	fatalError:function(error) {
+		throw new ParseError(error, this.locator);
+	}
+}
+function _locator(l){
+	if(l){
+		return '\n@'+(l.systemId ||'')+'#[line:'+l.lineNumber+',col:'+l.columnNumber+']'
+	}
+}
+function _toString(chars,start,length){
+	if(typeof chars == 'string'){
+		return chars.substr(start,length)
+	}else{//java sax connect width xmldom on rhino(what about: "? && !(chars instanceof String)")
+		if(chars.length >= start+length || start){
+			return new java.lang.String(chars,start,length)+'';
+		}
+		return chars;
+	}
+}
+
+/*
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/LexicalHandler.html
+ * used method of org.xml.sax.ext.LexicalHandler:
+ *  #comment(chars, start, length)
+ *  #startCDATA()
+ *  #endCDATA()
+ *  #startDTD(name, publicId, systemId)
+ *
+ *
+ * IGNORED method of org.xml.sax.ext.LexicalHandler:
+ *  #endDTD()
+ *  #startEntity(name)
+ *  #endEntity(name)
+ *
+ *
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/DeclHandler.html
+ * IGNORED method of org.xml.sax.ext.DeclHandler
+ * 	#attributeDecl(eName, aName, type, mode, value)
+ *  #elementDecl(name, model)
+ *  #externalEntityDecl(name, publicId, systemId)
+ *  #internalEntityDecl(name, value)
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/EntityResolver2.html
+ * IGNORED method of org.xml.sax.EntityResolver2
+ *  #resolveEntity(String name,String publicId,String baseURI,String systemId)
+ *  #resolveEntity(publicId, systemId)
+ *  #getExternalSubset(name, baseURI)
+ * @link http://www.saxproject.org/apidoc/org/xml/sax/DTDHandler.html
+ * IGNORED method of org.xml.sax.DTDHandler
+ *  #notationDecl(name, publicId, systemId) {};
+ *  #unparsedEntityDecl(name, publicId, systemId, notationName) {};
+ */
+"endDTD,startEntity,endEntity,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,resolveEntity,getExternalSubset,notationDecl,unparsedEntityDecl".replace(/\w+/g,function(key){
+	DOMHandler.prototype[key] = function(){return null}
+})
+
+/* Private static helpers treated below as private instance methods, so don't need to add these to the public API; we might use a Relator to also get rid of non-standard public properties */
+function appendElement (hander,node) {
+    if (!hander.currentElement) {
+        hander.doc.appendChild(node);
+    } else {
+        hander.currentElement.appendChild(node);
+    }
+}//appendChild and setAttributeNS are preformance key
+
+exports.__DOMHandler = DOMHandler;
+exports.normalizeLineEndings = normalizeLineEndings;
+exports.DOMParser = DOMParser;
 
 
 /***/ }),
@@ -678,6 +1664,17 @@ module.exports = function httpAdapter(config) {
 
 /***/ }),
 
+/***/ 111:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+var dom = __webpack_require__(389)
+exports.DOMImplementation = dom.DOMImplementation
+exports.XMLSerializer = dom.XMLSerializer
+exports.DOMParser = __webpack_require__(72).DOMParser
+
+
+/***/ }),
+
 /***/ 117:
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
@@ -719,655 +1716,6 @@ async function getLunsjkollektivetMenu() {
 }
 
 module.exports = { getLunsjkollektivetMenu };
-
-
-/***/ }),
-
-/***/ 124:
-/***/ (function(__unusedmodule, exports) {
-
-//[4]   	NameStartChar	   ::=   	":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D] | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
-//[4a]   	NameChar	   ::=   	NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
-//[5]   	Name	   ::=   	NameStartChar (NameChar)*
-var nameStartChar = /[A-Z_a-z\xC0-\xD6\xD8-\xF6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]///\u10000-\uEFFFF
-var nameChar = new RegExp("[\\-\\.0-9"+nameStartChar.source.slice(1,-1)+"\\u00B7\\u0300-\\u036F\\u203F-\\u2040]");
-var tagNamePattern = new RegExp('^'+nameStartChar.source+nameChar.source+'*(?:\:'+nameStartChar.source+nameChar.source+'*)?$');
-//var tagNamePattern = /^[a-zA-Z_][\w\-\.]*(?:\:[a-zA-Z_][\w\-\.]*)?$/
-//var handlers = 'resolveEntity,getExternalSubset,characters,endDocument,endElement,endPrefixMapping,ignorableWhitespace,processingInstruction,setDocumentLocator,skippedEntity,startDocument,startElement,startPrefixMapping,notationDecl,unparsedEntityDecl,error,fatalError,warning,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,comment,endCDATA,endDTD,endEntity,startCDATA,startDTD,startEntity'.split(',')
-
-//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
-//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
-var S_TAG = 0;//tag name offerring
-var S_ATTR = 1;//attr name offerring 
-var S_ATTR_SPACE=2;//attr name end and space offer
-var S_EQ = 3;//=space?
-var S_ATTR_NOQUOT_VALUE = 4;//attr value(no quot value only)
-var S_ATTR_END = 5;//attr value end and no space(quot end)
-var S_TAG_SPACE = 6;//(attr value end || tag end ) && (space offer)
-var S_TAG_CLOSE = 7;//closed el<el />
-
-/**
- * Creates an error that will not be caught by XMLReader aka the SAX parser.
- *
- * @param {string} message
- * @param {any?} locator Optional, can provide details about the location in the source
- * @constructor
- */
-function ParseError(message, locator) {
-	this.message = message
-	this.locator = locator
-	if(Error.captureStackTrace) Error.captureStackTrace(this, ParseError);
-}
-ParseError.prototype = new Error();
-ParseError.prototype.name = ParseError.name
-
-function XMLReader(){
-	
-}
-
-XMLReader.prototype = {
-	parse:function(source,defaultNSMap,entityMap){
-		var domBuilder = this.domBuilder;
-		domBuilder.startDocument();
-		_copy(defaultNSMap ,defaultNSMap = {})
-		parse(source,defaultNSMap,entityMap,
-				domBuilder,this.errorHandler);
-		domBuilder.endDocument();
-	}
-}
-function parse(source,defaultNSMapCopy,entityMap,domBuilder,errorHandler){
-	function fixedFromCharCode(code) {
-		// String.prototype.fromCharCode does not supports
-		// > 2 bytes unicode chars directly
-		if (code > 0xffff) {
-			code -= 0x10000;
-			var surrogate1 = 0xd800 + (code >> 10)
-				, surrogate2 = 0xdc00 + (code & 0x3ff);
-
-			return String.fromCharCode(surrogate1, surrogate2);
-		} else {
-			return String.fromCharCode(code);
-		}
-	}
-	function entityReplacer(a){
-		var k = a.slice(1,-1);
-		if(k in entityMap){
-			return entityMap[k]; 
-		}else if(k.charAt(0) === '#'){
-			return fixedFromCharCode(parseInt(k.substr(1).replace('x','0x')))
-		}else{
-			errorHandler.error('entity not found:'+a);
-			return a;
-		}
-	}
-	function appendText(end){//has some bugs
-		if(end>start){
-			var xt = source.substring(start,end).replace(/&#?\w+;/g,entityReplacer);
-			locator&&position(start);
-			domBuilder.characters(xt,0,end-start);
-			start = end
-		}
-	}
-	function position(p,m){
-		while(p>=lineEnd && (m = linePattern.exec(source))){
-			lineStart = m.index;
-			lineEnd = lineStart + m[0].length;
-			locator.lineNumber++;
-			//console.log('line++:',locator,startPos,endPos)
-		}
-		locator.columnNumber = p-lineStart+1;
-	}
-	var lineStart = 0;
-	var lineEnd = 0;
-	var linePattern = /.*(?:\r\n?|\n)|.*$/g
-	var locator = domBuilder.locator;
-	
-	var parseStack = [{currentNSMap:defaultNSMapCopy}]
-	var closeMap = {};
-	var start = 0;
-	while(true){
-		try{
-			var tagStart = source.indexOf('<',start);
-			if(tagStart<0){
-				if(!source.substr(start).match(/^\s*$/)){
-					var doc = domBuilder.doc;
-	    			var text = doc.createTextNode(source.substr(start));
-	    			doc.appendChild(text);
-	    			domBuilder.currentElement = text;
-				}
-				return;
-			}
-			if(tagStart>start){
-				appendText(tagStart);
-			}
-			switch(source.charAt(tagStart+1)){
-			case '/':
-				var end = source.indexOf('>',tagStart+3);
-				var tagName = source.substring(tagStart+2,end);
-				var config = parseStack.pop();
-				if(end<0){
-					
-	        		tagName = source.substring(tagStart+2).replace(/[\s<].*/,'');
-	        		errorHandler.error("end tag name: "+tagName+' is not complete:'+config.tagName);
-	        		end = tagStart+1+tagName.length;
-	        	}else if(tagName.match(/\s</)){
-	        		tagName = tagName.replace(/[\s<].*/,'');
-	        		errorHandler.error("end tag name: "+tagName+' maybe not complete');
-	        		end = tagStart+1+tagName.length;
-				}
-				var localNSMap = config.localNSMap;
-				var endMatch = config.tagName == tagName;
-				var endIgnoreCaseMach = endMatch || config.tagName&&config.tagName.toLowerCase() == tagName.toLowerCase()
-		        if(endIgnoreCaseMach){
-		        	domBuilder.endElement(config.uri,config.localName,tagName);
-					if(localNSMap){
-						for(var prefix in localNSMap){
-							domBuilder.endPrefixMapping(prefix) ;
-						}
-					}
-					if(!endMatch){
-		            	errorHandler.fatalError("end tag name: "+tagName+' is not match the current start tagName:'+config.tagName ); // No known test case
-					}
-		        }else{
-		        	parseStack.push(config)
-		        }
-				
-				end++;
-				break;
-				// end elment
-			case '?':// <?...?>
-				locator&&position(tagStart);
-				end = parseInstruction(source,tagStart,domBuilder);
-				break;
-			case '!':// <!doctype,<![CDATA,<!--
-				locator&&position(tagStart);
-				end = parseDCC(source,tagStart,domBuilder,errorHandler);
-				break;
-			default:
-				locator&&position(tagStart);
-				var el = new ElementAttributes();
-				var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
-				//elStartEnd
-				var end = parseElementStartPart(source,tagStart,el,currentNSMap,entityReplacer,errorHandler);
-				var len = el.length;
-				
-				
-				if(!el.closed && fixSelfClosed(source,end,el.tagName,closeMap)){
-					el.closed = true;
-					if(!entityMap.nbsp){
-						errorHandler.warning('unclosed xml attribute');
-					}
-				}
-				if(locator && len){
-					var locator2 = copyLocator(locator,{});
-					//try{//attribute position fixed
-					for(var i = 0;i<len;i++){
-						var a = el[i];
-						position(a.offset);
-						a.locator = copyLocator(locator,{});
-					}
-					domBuilder.locator = locator2
-					if(appendElement(el,domBuilder,currentNSMap)){
-						parseStack.push(el)
-					}
-					domBuilder.locator = locator;
-				}else{
-					if(appendElement(el,domBuilder,currentNSMap)){
-						parseStack.push(el)
-					}
-				}
-				
-				
-				
-				if(el.uri === 'http://www.w3.org/1999/xhtml' && !el.closed){
-					end = parseHtmlSpecialContent(source,end,el.tagName,entityReplacer,domBuilder)
-				}else{
-					end++;
-				}
-			}
-		}catch(e){
-			if (e instanceof ParseError) {
-				throw e;
-			}
-			errorHandler.error('element parse error: '+e)
-			end = -1;
-		}
-		if(end>start){
-			start = end;
-		}else{
-			//TODO: 这里有可能sax回退，有位置错误风险
-			appendText(Math.max(tagStart,start)+1);
-		}
-	}
-}
-function copyLocator(f,t){
-	t.lineNumber = f.lineNumber;
-	t.columnNumber = f.columnNumber;
-	return t;
-}
-
-/**
- * @see #appendElement(source,elStartEnd,el,selfClosed,entityReplacer,domBuilder,parseStack);
- * @return end of the elementStartPart(end of elementEndPart for selfClosed el)
- */
-function parseElementStartPart(source,start,el,currentNSMap,entityReplacer,errorHandler){
-
-	/**
-	 * @param {string} qname
-	 * @param {string} value
-	 * @param {number} startIndex
-	 */
-	function addAttribute(qname, value, startIndex) {
-		if (qname in el.attributeNames) errorHandler.fatalError('Attribute ' + qname + ' redefined')
-		el.addValue(qname, value, startIndex)
-	}
-	var attrName;
-	var value;
-	var p = ++start;
-	var s = S_TAG;//status
-	while(true){
-		var c = source.charAt(p);
-		switch(c){
-		case '=':
-			if(s === S_ATTR){//attrName
-				attrName = source.slice(start,p);
-				s = S_EQ;
-			}else if(s === S_ATTR_SPACE){
-				s = S_EQ;
-			}else{
-				//fatalError: equal must after attrName or space after attrName
-				throw new Error('attribute equal must after attrName'); // No known test case
-			}
-			break;
-		case '\'':
-		case '"':
-			if(s === S_EQ || s === S_ATTR //|| s == S_ATTR_SPACE
-				){//equal
-				if(s === S_ATTR){
-					errorHandler.warning('attribute value must after "="')
-					attrName = source.slice(start,p)
-				}
-				start = p+1;
-				p = source.indexOf(c,start)
-				if(p>0){
-					value = source.slice(start,p).replace(/&#?\w+;/g,entityReplacer);
-					addAttribute(attrName, value, start-1);
-					s = S_ATTR_END;
-				}else{
-					//fatalError: no end quot match
-					throw new Error('attribute value no end \''+c+'\' match');
-				}
-			}else if(s == S_ATTR_NOQUOT_VALUE){
-				value = source.slice(start,p).replace(/&#?\w+;/g,entityReplacer);
-				//console.log(attrName,value,start,p)
-				addAttribute(attrName, value, start);
-				//console.dir(el)
-				errorHandler.warning('attribute "'+attrName+'" missed start quot('+c+')!!');
-				start = p+1;
-				s = S_ATTR_END
-			}else{
-				//fatalError: no equal before
-				throw new Error('attribute value must after "="'); // No known test case
-			}
-			break;
-		case '/':
-			switch(s){
-			case S_TAG:
-				el.setTagName(source.slice(start,p));
-			case S_ATTR_END:
-			case S_TAG_SPACE:
-			case S_TAG_CLOSE:
-				s =S_TAG_CLOSE;
-				el.closed = true;
-			case S_ATTR_NOQUOT_VALUE:
-			case S_ATTR:
-			case S_ATTR_SPACE:
-				break;
-			//case S_EQ:
-			default:
-				throw new Error("attribute invalid close char('/')") // No known test case
-			}
-			break;
-		case ''://end document
-			errorHandler.error('unexpected end of input');
-			if(s == S_TAG){
-				el.setTagName(source.slice(start,p));
-			}
-			return p;
-		case '>':
-			switch(s){
-			case S_TAG:
-				el.setTagName(source.slice(start,p));
-			case S_ATTR_END:
-			case S_TAG_SPACE:
-			case S_TAG_CLOSE:
-				break;//normal
-			case S_ATTR_NOQUOT_VALUE://Compatible state
-			case S_ATTR:
-				value = source.slice(start,p);
-				if(value.slice(-1) === '/'){
-					el.closed  = true;
-					value = value.slice(0,-1)
-				}
-			case S_ATTR_SPACE:
-				if(s === S_ATTR_SPACE){
-					value = attrName;
-				}
-				if(s == S_ATTR_NOQUOT_VALUE){
-					errorHandler.warning('attribute "'+value+'" missed quot(")!');
-					addAttribute(attrName, value.replace(/&#?\w+;/g,entityReplacer), start)
-				}else{
-					if(currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !value.match(/^(?:disabled|checked|selected)$/i)){
-						errorHandler.warning('attribute "'+value+'" missed value!! "'+value+'" instead!!')
-					}
-					addAttribute(value, value, start)
-				}
-				break;
-			case S_EQ:
-				throw new Error('attribute value missed!!');
-			}
-//			console.log(tagName,tagNamePattern,tagNamePattern.test(tagName))
-			return p;
-		/*xml space '\x20' | #x9 | #xD | #xA; */
-		case '\u0080':
-			c = ' ';
-		default:
-			if(c<= ' '){//space
-				switch(s){
-				case S_TAG:
-					el.setTagName(source.slice(start,p));//tagName
-					s = S_TAG_SPACE;
-					break;
-				case S_ATTR:
-					attrName = source.slice(start,p)
-					s = S_ATTR_SPACE;
-					break;
-				case S_ATTR_NOQUOT_VALUE:
-					var value = source.slice(start,p).replace(/&#?\w+;/g,entityReplacer);
-					errorHandler.warning('attribute "'+value+'" missed quot(")!!');
-					addAttribute(attrName, value, start)
-				case S_ATTR_END:
-					s = S_TAG_SPACE;
-					break;
-				//case S_TAG_SPACE:
-				//case S_EQ:
-				//case S_ATTR_SPACE:
-				//	void();break;
-				//case S_TAG_CLOSE:
-					//ignore warning
-				}
-			}else{//not space
-//S_TAG,	S_ATTR,	S_EQ,	S_ATTR_NOQUOT_VALUE
-//S_ATTR_SPACE,	S_ATTR_END,	S_TAG_SPACE, S_TAG_CLOSE
-				switch(s){
-				//case S_TAG:void();break;
-				//case S_ATTR:void();break;
-				//case S_ATTR_NOQUOT_VALUE:void();break;
-				case S_ATTR_SPACE:
-					var tagName =  el.tagName;
-					if(currentNSMap[''] !== 'http://www.w3.org/1999/xhtml' || !attrName.match(/^(?:disabled|checked|selected)$/i)){
-						errorHandler.warning('attribute "'+attrName+'" missed value!! "'+attrName+'" instead2!!')
-					}
-					addAttribute(attrName, attrName, start);
-					start = p;
-					s = S_ATTR;
-					break;
-				case S_ATTR_END:
-					errorHandler.warning('attribute space is required"'+attrName+'"!!')
-				case S_TAG_SPACE:
-					s = S_ATTR;
-					start = p;
-					break;
-				case S_EQ:
-					s = S_ATTR_NOQUOT_VALUE;
-					start = p;
-					break;
-				case S_TAG_CLOSE:
-					throw new Error("elements closed character '/' and '>' must be connected to");
-				}
-			}
-		}//end outer switch
-		//console.log('p++',p)
-		p++;
-	}
-}
-/**
- * @return true if has new namespace define
- */
-function appendElement(el,domBuilder,currentNSMap){
-	var tagName = el.tagName;
-	var localNSMap = null;
-	//var currentNSMap = parseStack[parseStack.length-1].currentNSMap;
-	var i = el.length;
-	while(i--){
-		var a = el[i];
-		var qName = a.qName;
-		var value = a.value;
-		var nsp = qName.indexOf(':');
-		if(nsp>0){
-			var prefix = a.prefix = qName.slice(0,nsp);
-			var localName = qName.slice(nsp+1);
-			var nsPrefix = prefix === 'xmlns' && localName
-		}else{
-			localName = qName;
-			prefix = null
-			nsPrefix = qName === 'xmlns' && ''
-		}
-		//can not set prefix,because prefix !== ''
-		a.localName = localName ;
-		//prefix == null for no ns prefix attribute 
-		if(nsPrefix !== false){//hack!!
-			if(localNSMap == null){
-				localNSMap = {}
-				//console.log(currentNSMap,0)
-				_copy(currentNSMap,currentNSMap={})
-				//console.log(currentNSMap,1)
-			}
-			currentNSMap[nsPrefix] = localNSMap[nsPrefix] = value;
-			a.uri = 'http://www.w3.org/2000/xmlns/'
-			domBuilder.startPrefixMapping(nsPrefix, value) 
-		}
-	}
-	var i = el.length;
-	while(i--){
-		a = el[i];
-		var prefix = a.prefix;
-		if(prefix){//no prefix attribute has no namespace
-			if(prefix === 'xml'){
-				a.uri = 'http://www.w3.org/XML/1998/namespace';
-			}if(prefix !== 'xmlns'){
-				a.uri = currentNSMap[prefix || '']
-				
-				//{console.log('###'+a.qName,domBuilder.locator.systemId+'',currentNSMap,a.uri)}
-			}
-		}
-	}
-	var nsp = tagName.indexOf(':');
-	if(nsp>0){
-		prefix = el.prefix = tagName.slice(0,nsp);
-		localName = el.localName = tagName.slice(nsp+1);
-	}else{
-		prefix = null;//important!!
-		localName = el.localName = tagName;
-	}
-	//no prefix element has default namespace
-	var ns = el.uri = currentNSMap[prefix || ''];
-	domBuilder.startElement(ns,localName,tagName,el);
-	//endPrefixMapping and startPrefixMapping have not any help for dom builder
-	//localNSMap = null
-	if(el.closed){
-		domBuilder.endElement(ns,localName,tagName);
-		if(localNSMap){
-			for(prefix in localNSMap){
-				domBuilder.endPrefixMapping(prefix) 
-			}
-		}
-	}else{
-		el.currentNSMap = currentNSMap;
-		el.localNSMap = localNSMap;
-		//parseStack.push(el);
-		return true;
-	}
-}
-function parseHtmlSpecialContent(source,elStartEnd,tagName,entityReplacer,domBuilder){
-	if(/^(?:script|textarea)$/i.test(tagName)){
-		var elEndStart =  source.indexOf('</'+tagName+'>',elStartEnd);
-		var text = source.substring(elStartEnd+1,elEndStart);
-		if(/[&<]/.test(text)){
-			if(/^script$/i.test(tagName)){
-				//if(!/\]\]>/.test(text)){
-					//lexHandler.startCDATA();
-					domBuilder.characters(text,0,text.length);
-					//lexHandler.endCDATA();
-					return elEndStart;
-				//}
-			}//}else{//text area
-				text = text.replace(/&#?\w+;/g,entityReplacer);
-				domBuilder.characters(text,0,text.length);
-				return elEndStart;
-			//}
-			
-		}
-	}
-	return elStartEnd+1;
-}
-function fixSelfClosed(source,elStartEnd,tagName,closeMap){
-	//if(tagName in closeMap){
-	var pos = closeMap[tagName];
-	if(pos == null){
-		//console.log(tagName)
-		pos =  source.lastIndexOf('</'+tagName+'>')
-		if(pos<elStartEnd){//忘记闭合
-			pos = source.lastIndexOf('</'+tagName)
-		}
-		closeMap[tagName] =pos
-	}
-	return pos<elStartEnd;
-	//} 
-}
-function _copy(source,target){
-	for(var n in source){target[n] = source[n]}
-}
-function parseDCC(source,start,domBuilder,errorHandler){//sure start with '<!'
-	var next= source.charAt(start+2)
-	switch(next){
-	case '-':
-		if(source.charAt(start + 3) === '-'){
-			var end = source.indexOf('-->',start+4);
-			//append comment source.substring(4,end)//<!--
-			if(end>start){
-				domBuilder.comment(source,start+4,end-start-4);
-				return end+3;
-			}else{
-				errorHandler.error("Unclosed comment");
-				return -1;
-			}
-		}else{
-			//error
-			return -1;
-		}
-	default:
-		if(source.substr(start+3,6) == 'CDATA['){
-			var end = source.indexOf(']]>',start+9);
-			domBuilder.startCDATA();
-			domBuilder.characters(source,start+9,end-start-9);
-			domBuilder.endCDATA() 
-			return end+3;
-		}
-		//<!DOCTYPE
-		//startDTD(java.lang.String name, java.lang.String publicId, java.lang.String systemId) 
-		var matchs = split(source,start);
-		var len = matchs.length;
-		if(len>1 && /!doctype/i.test(matchs[0][0])){
-			var name = matchs[1][0];
-			var pubid = false;
-			var sysid = false;
-			if(len>3){
-				if(/^public$/i.test(matchs[2][0])){
-					pubid = matchs[3][0];
-					sysid = len>4 && matchs[4][0];
-				}else if(/^system$/i.test(matchs[2][0])){
-					sysid = matchs[3][0];
-				}
-			}
-			var lastMatch = matchs[len-1]
-			domBuilder.startDTD(name, pubid, sysid);
-			domBuilder.endDTD();
-			
-			return lastMatch.index+lastMatch[0].length
-		}
-	}
-	return -1;
-}
-
-
-
-function parseInstruction(source,start,domBuilder){
-	var end = source.indexOf('?>',start);
-	if(end){
-		var match = source.substring(start,end).match(/^<\?(\S*)\s*([\s\S]*?)\s*$/);
-		if(match){
-			var len = match[0].length;
-			domBuilder.processingInstruction(match[1], match[2]) ;
-			return end+2;
-		}else{//error
-			return -1;
-		}
-	}
-	return -1;
-}
-
-function ElementAttributes(){
-	this.attributeNames = {}
-}
-ElementAttributes.prototype = {
-	setTagName:function(tagName){
-		if(!tagNamePattern.test(tagName)){
-			throw new Error('invalid tagName:'+tagName)
-		}
-		this.tagName = tagName
-	},
-	addValue:function(qName, value, offset) {
-		if(!tagNamePattern.test(qName)){
-			throw new Error('invalid attribute:'+qName)
-		}
-		this.attributeNames[qName] = this.length;
-		this[this.length++] = {qName:qName,value:value,offset:offset}
-	},
-	length:0,
-	getLocalName:function(i){return this[i].localName},
-	getLocator:function(i){return this[i].locator},
-	getQName:function(i){return this[i].qName},
-	getURI:function(i){return this[i].uri},
-	getValue:function(i){return this[i].value}
-//	,getIndex:function(uri, localName)){
-//		if(localName){
-//			
-//		}else{
-//			var qName = uri
-//		}
-//	},
-//	getValue:function(){return this.getValue(this.getIndex.apply(this,arguments))},
-//	getType:function(uri,localName){}
-//	getType:function(i){},
-}
-
-
-
-function split(source,start){
-	var match;
-	var buf = [];
-	var reg = /'[^']+'|"[^"]+"|[^\s<>\/=]+=?|(\/?\s*>|<)/g;
-	reg.lastIndex = start;
-	reg.exec(source);//skip <
-	while(match = reg.exec(source)){
-		buf.push(match);
-		if(match[1])return buf;
-	}
-}
-
-exports.XMLReader = XMLReader;
-exports.ParseError = ParseError;
 
 
 /***/ }),
@@ -4190,266 +4538,6 @@ async function translateString(string) {
 }
 
 module.exports = { translateString };
-
-
-/***/ }),
-
-/***/ 286:
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
-
-function DOMParser(options){
-	this.options = options ||{locator:{}};
-}
-
-DOMParser.prototype.parseFromString = function(source,mimeType){
-	var options = this.options;
-	var sax =  new XMLReader();
-	var domBuilder = options.domBuilder || new DOMHandler();//contentHandler and LexicalHandler
-	var errorHandler = options.errorHandler;
-	var locator = options.locator;
-	var defaultNSMap = options.xmlns||{};
-	var isHTML = /\/x?html?$/.test(mimeType);//mimeType.toLowerCase().indexOf('html') > -1;
-  	var entityMap = isHTML?htmlEntity.entityMap:{'lt':'<','gt':'>','amp':'&','quot':'"','apos':"'"};
-	if(locator){
-		domBuilder.setDocumentLocator(locator)
-	}
-
-	sax.errorHandler = buildErrorHandler(errorHandler,domBuilder,locator);
-	sax.domBuilder = options.domBuilder || domBuilder;
-	if(isHTML){
-		defaultNSMap['']= 'http://www.w3.org/1999/xhtml';
-	}
-	defaultNSMap.xml = defaultNSMap.xml || 'http://www.w3.org/XML/1998/namespace';
-	if(source && typeof source === 'string'){
-		sax.parse(source,defaultNSMap,entityMap);
-	}else{
-		sax.errorHandler.error("invalid doc source");
-	}
-	return domBuilder.doc;
-}
-function buildErrorHandler(errorImpl,domBuilder,locator){
-	if(!errorImpl){
-		if(domBuilder instanceof DOMHandler){
-			return domBuilder;
-		}
-		errorImpl = domBuilder ;
-	}
-	var errorHandler = {}
-	var isCallback = errorImpl instanceof Function;
-	locator = locator||{}
-	function build(key){
-		var fn = errorImpl[key];
-		if(!fn && isCallback){
-			fn = errorImpl.length == 2?function(msg){errorImpl(key,msg)}:errorImpl;
-		}
-		errorHandler[key] = fn && function(msg){
-			fn('[xmldom '+key+']\t'+msg+_locator(locator));
-		}||function(){};
-	}
-	build('warning');
-	build('error');
-	build('fatalError');
-	return errorHandler;
-}
-
-//console.log('#\n\n\n\n\n\n\n####')
-/**
- * +ContentHandler+ErrorHandler
- * +LexicalHandler+EntityResolver2
- * -DeclHandler-DTDHandler
- *
- * DefaultHandler:EntityResolver, DTDHandler, ContentHandler, ErrorHandler
- * DefaultHandler2:DefaultHandler,LexicalHandler, DeclHandler, EntityResolver2
- * @link http://www.saxproject.org/apidoc/org/xml/sax/helpers/DefaultHandler.html
- */
-function DOMHandler() {
-    this.cdata = false;
-}
-function position(locator,node){
-	node.lineNumber = locator.lineNumber;
-	node.columnNumber = locator.columnNumber;
-}
-/**
- * @see org.xml.sax.ContentHandler#startDocument
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ContentHandler.html
- */
-DOMHandler.prototype = {
-	startDocument : function() {
-    	this.doc = new DOMImplementation().createDocument(null, null, null);
-    	if (this.locator) {
-        	this.doc.documentURI = this.locator.systemId;
-    	}
-	},
-	startElement:function(namespaceURI, localName, qName, attrs) {
-		var doc = this.doc;
-	    var el = doc.createElementNS(namespaceURI, qName||localName);
-	    var len = attrs.length;
-	    appendElement(this, el);
-	    this.currentElement = el;
-
-		this.locator && position(this.locator,el)
-	    for (var i = 0 ; i < len; i++) {
-	        var namespaceURI = attrs.getURI(i);
-	        var value = attrs.getValue(i);
-	        var qName = attrs.getQName(i);
-			var attr = doc.createAttributeNS(namespaceURI, qName);
-			this.locator &&position(attrs.getLocator(i),attr);
-			attr.value = attr.nodeValue = value;
-			el.setAttributeNode(attr)
-	    }
-	},
-	endElement:function(namespaceURI, localName, qName) {
-		var current = this.currentElement
-		var tagName = current.tagName;
-		this.currentElement = current.parentNode;
-	},
-	startPrefixMapping:function(prefix, uri) {
-	},
-	endPrefixMapping:function(prefix) {
-	},
-	processingInstruction:function(target, data) {
-	    var ins = this.doc.createProcessingInstruction(target, data);
-	    this.locator && position(this.locator,ins)
-	    appendElement(this, ins);
-	},
-	ignorableWhitespace:function(ch, start, length) {
-	},
-	characters:function(chars, start, length) {
-		chars = _toString.apply(this,arguments)
-		//console.log(chars)
-		if(chars){
-			if (this.cdata) {
-				var charNode = this.doc.createCDATASection(chars);
-			} else {
-				var charNode = this.doc.createTextNode(chars);
-			}
-			if(this.currentElement){
-				this.currentElement.appendChild(charNode);
-			}else if(/^\s*$/.test(chars)){
-				this.doc.appendChild(charNode);
-				//process xml
-			}
-			this.locator && position(this.locator,charNode)
-		}
-	},
-	skippedEntity:function(name) {
-	},
-	endDocument:function() {
-		this.doc.normalize();
-	},
-	setDocumentLocator:function (locator) {
-	    if(this.locator = locator){// && !('lineNumber' in locator)){
-	    	locator.lineNumber = 0;
-	    }
-	},
-	//LexicalHandler
-	comment:function(chars, start, length) {
-		chars = _toString.apply(this,arguments)
-	    var comm = this.doc.createComment(chars);
-	    this.locator && position(this.locator,comm)
-	    appendElement(this, comm);
-	},
-
-	startCDATA:function() {
-	    //used in characters() methods
-	    this.cdata = true;
-	},
-	endCDATA:function() {
-	    this.cdata = false;
-	},
-
-	startDTD:function(name, publicId, systemId) {
-		var impl = this.doc.implementation;
-	    if (impl && impl.createDocumentType) {
-	        var dt = impl.createDocumentType(name, publicId, systemId);
-	        this.locator && position(this.locator,dt)
-	        appendElement(this, dt);
-	    }
-	},
-	/**
-	 * @see org.xml.sax.ErrorHandler
-	 * @link http://www.saxproject.org/apidoc/org/xml/sax/ErrorHandler.html
-	 */
-	warning:function(error) {
-		console.warn('[xmldom warning]\t'+error,_locator(this.locator));
-	},
-	error:function(error) {
-		console.error('[xmldom error]\t'+error,_locator(this.locator));
-	},
-	fatalError:function(error) {
-		throw new ParseError(error, this.locator);
-	}
-}
-function _locator(l){
-	if(l){
-		return '\n@'+(l.systemId ||'')+'#[line:'+l.lineNumber+',col:'+l.columnNumber+']'
-	}
-}
-function _toString(chars,start,length){
-	if(typeof chars == 'string'){
-		return chars.substr(start,length)
-	}else{//java sax connect width xmldom on rhino(what about: "? && !(chars instanceof String)")
-		if(chars.length >= start+length || start){
-			return new java.lang.String(chars,start,length)+'';
-		}
-		return chars;
-	}
-}
-
-/*
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/LexicalHandler.html
- * used method of org.xml.sax.ext.LexicalHandler:
- *  #comment(chars, start, length)
- *  #startCDATA()
- *  #endCDATA()
- *  #startDTD(name, publicId, systemId)
- *
- *
- * IGNORED method of org.xml.sax.ext.LexicalHandler:
- *  #endDTD()
- *  #startEntity(name)
- *  #endEntity(name)
- *
- *
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/DeclHandler.html
- * IGNORED method of org.xml.sax.ext.DeclHandler
- * 	#attributeDecl(eName, aName, type, mode, value)
- *  #elementDecl(name, model)
- *  #externalEntityDecl(name, publicId, systemId)
- *  #internalEntityDecl(name, value)
- * @link http://www.saxproject.org/apidoc/org/xml/sax/ext/EntityResolver2.html
- * IGNORED method of org.xml.sax.EntityResolver2
- *  #resolveEntity(String name,String publicId,String baseURI,String systemId)
- *  #resolveEntity(publicId, systemId)
- *  #getExternalSubset(name, baseURI)
- * @link http://www.saxproject.org/apidoc/org/xml/sax/DTDHandler.html
- * IGNORED method of org.xml.sax.DTDHandler
- *  #notationDecl(name, publicId, systemId) {};
- *  #unparsedEntityDecl(name, publicId, systemId, notationName) {};
- */
-"endDTD,startEntity,endEntity,attributeDecl,elementDecl,externalEntityDecl,internalEntityDecl,resolveEntity,getExternalSubset,notationDecl,unparsedEntityDecl".replace(/\w+/g,function(key){
-	DOMHandler.prototype[key] = function(){return null}
-})
-
-/* Private static helpers treated below as private instance methods, so don't need to add these to the public API; we might use a Relator to also get rid of non-standard public properties */
-function appendElement (hander,node) {
-    if (!hander.currentElement) {
-        hander.doc.appendChild(node);
-    } else {
-        hander.currentElement.appendChild(node);
-    }
-}//appendChild and setAttributeNS are preformance key
-
-//if(typeof require == 'function'){
-var htmlEntity = __webpack_require__(507);
-var sax = __webpack_require__(124);
-var XMLReader = sax.XMLReader;
-var ParseError = sax.ParseError;
-var DOMImplementation = exports.DOMImplementation = __webpack_require__(555).DOMImplementation;
-exports.XMLSerializer = __webpack_require__(555).XMLSerializer ;
-exports.DOMParser = DOMParser;
-exports.__DOMHandler = DOMHandler;
-//}
 
 
 /***/ }),
@@ -10232,7 +10320,7 @@ var _queryString = __webpack_require__(293);
 
 var _xpath = _interopRequireDefault(__webpack_require__(319));
 
-var _xmldom = __webpack_require__(286);
+var _xmldom = __webpack_require__(111);
 
 var _Translator = __webpack_require__(778);
 
@@ -10606,6 +10694,7 @@ function (_super) {
         }
 
         if (!Array.isArray(resp)) {
+          console.warn('Translator response', rawResp);
           throw new Error('Unexpected response');
         }
 
@@ -10616,18 +10705,24 @@ function (_super) {
 
           if (from === 'auto') {
             // Structure: [translate: string, detectedLanguage: string]
-            if (!Array.isArray(chunk) || typeof chunk[0] !== 'string') {
+            if (text.length === 1 && Array.isArray(chunk) && typeof chunk[0] === 'string') {
+              translatedText = chunk[0];
+            } else if (text.length > 1 && typeof chunk === 'string') {
+              translatedText = chunk;
+            } else {
+              console.warn('Translator response', rawResp);
               throw new Error('Unexpected response');
             }
-
-            translatedText = chunk[0];
           } else {
             // Structure: translate: string
-            if (typeof chunk !== 'string') {
+            if (typeof chunk === 'string') {
+              translatedText = chunk;
+            } else if (Array.isArray(chunk) && typeof chunk[0] === 'string') {
+              translatedText = chunk[0];
+            } else {
+              console.warn('Translator response', rawResp);
               throw new Error('Unexpected response');
             }
-
-            translatedText = chunk;
           } // Try to parse XML
 
 
@@ -10725,19 +10820,29 @@ function (_super) {
         // Handle many texts
         var innerArray = rawResp[0];
 
-        if (!Array.isArray(innerArray) || innerArray.length !== text.length) {
-          throw new TypeError('Invalid response');
+        if (Array.isArray(innerArray) && innerArray.length === text.length) {
+          return innerArray.map(function (item) {
+            var obj = (0, _utils.deepExploreArray)(item, 3);
+
+            if (typeof obj !== 'string') {
+              console.warn('Translator response', rawResp);
+              throw new TypeError('Invalid item type');
+            }
+
+            return obj;
+          });
+        } else if (Array.isArray(rawResp) && rawResp.length === text.length) {
+          rawResp.forEach(function (item) {
+            if (typeof item !== 'string') {
+              console.warn('Translator response', rawResp);
+              throw new TypeError('Invalid item type');
+            }
+          });
+          return rawResp;
         }
 
-        return innerArray.map(function (item) {
-          var obj = (0, _utils.deepExploreArray)(item, 3);
-
-          if (typeof obj !== 'string') {
-            throw new TypeError('Invalid item type');
-          }
-
-          return obj;
-        });
+        console.warn('Translator response', rawResp);
+        throw new TypeError('Invalid response');
       } else if (text.length === 1 && typeof rawResp === 'object' && rawResp !== null && 'sentences' in rawResp) {
         // Handle one text
         var sentences = rawResp.sentences;
@@ -10748,6 +10853,7 @@ function (_super) {
 
         var translatedText = sentences.slice(0, -1).map(function (sentence) {
           if (typeof sentence !== 'object' || !('trans' in sentence)) {
+            console.warn('Translator response', rawResp);
             throw new TypeError('Invalid response');
           }
 
@@ -10756,6 +10862,7 @@ function (_super) {
         return [translatedText];
       }
 
+      console.warn('Translator response', rawResp);
       throw new TypeError('Invalid response');
     });
   };
@@ -10765,7 +10872,7 @@ function (_super) {
 }(AbstractGoogleTranslator);
 
 exports.GoogleTranslatorTokenFree = GoogleTranslatorTokenFree;
-//# sourceMappingURL=data:application/json;charset=utf8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbInRyYW5zbGF0b3JzL0dvb2dsZVRyYW5zbGF0b3IvaW5kZXgudHMiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6Ijs7Ozs7OztBQUFBOztBQUNBOztBQUNBOztBQUNBOztBQUVBOztBQUNBOztBQUNBOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7OztBQUVBOztBQUVHO0FBQ0gsSUFBQSx3QkFBQTtBQUFBO0FBQUEsVUFBQSxNQUFBLEVBQUE7QUFBdUQsRUFBQSxTQUFBLENBQUEsd0JBQUEsRUFBQSxNQUFBLENBQUE7O0FBQXZELFdBQUEsd0JBQUEsR0FBQTtBQUFBLFFBQUEsS0FBQSxHQUFBLE1BQUEsS0FBQSxJQUFBLElBQUEsTUFBQSxDQUFBLEtBQUEsQ0FBQSxJQUFBLEVBQUEsU0FBQSxDQUFBLElBQUEsSUFBQTs7QUFpQ29CLElBQUEsS0FBQSxDQUFBLGdCQUFBLEdBQTJDO0FBQzdELE1BQUEsRUFBRSxFQUFFO0FBRHlELEtBQTNDOztBQU9uQjs7QUF2Q2MsRUFBQSx3QkFBQSxDQUFBLG1CQUFBLEdBQWQsWUFBQTtBQUNDLFdBQU8sSUFBUDtBQUNBLEdBRmE7O0FBSUEsRUFBQSx3QkFBQSxDQUFBLHFCQUFBLEdBQWQsWUFBQTtBQUNDO0FBRUE7QUFDQTtBQUNBLFdBQU8sQ0FDTixJQURNLEVBQ0EsSUFEQSxFQUNNLElBRE4sRUFDWSxJQURaLEVBQ2tCLElBRGxCLEVBQ3dCLElBRHhCLEVBQzhCLElBRDlCLEVBQ29DLElBRHBDLEVBQzBDLElBRDFDLEVBQ2dELElBRGhELEVBRU4sSUFGTSxFQUVBLElBRkEsRUFFTSxJQUZOLEVBRVksSUFGWixFQUVrQixJQUZsQixFQUV3QixJQUZ4QixFQUU4QixJQUY5QixFQUVvQyxJQUZwQyxFQUUwQyxJQUYxQyxFQUVnRCxJQUZoRCxFQUdOLElBSE0sRUFHQSxJQUhBLEVBR00sSUFITixFQUdZLElBSFosRUFHa0IsSUFIbEIsRUFHd0IsSUFIeEIsRUFHOEIsSUFIOUIsRUFHb0MsSUFIcEMsRUFHMEMsSUFIMUMsRUFHZ0QsSUFIaEQsRUFJTixJQUpNLEVBSUEsSUFKQSxFQUlNLElBSk4sRUFJWSxJQUpaLEVBSWtCLElBSmxCLEVBSXdCLElBSnhCLEVBSThCLElBSjlCLEVBSW9DLElBSnBDLEVBSTBDLElBSjFDLEVBSWdELElBSmhELEVBS04sSUFMTSxFQUtBLElBTEEsRUFLTSxJQUxOLEVBS1ksSUFMWixFQUtrQixJQUxsQixFQUt3QixJQUx4QixFQUs4QixJQUw5QixFQUtvQyxJQUxwQyxFQUswQyxJQUwxQyxFQUtnRCxJQUxoRCxFQU1OLElBTk0sRUFNQSxJQU5BLEVBTU0sSUFOTixFQU1ZLElBTlosRUFNa0IsSUFObEIsRUFNd0IsSUFOeEIsRUFNOEIsSUFOOUIsRUFNb0MsSUFOcEMsRUFNMEMsSUFOMUMsRUFNZ0QsSUFOaEQsRUFPTixJQVBNLEVBT0EsSUFQQSxFQU9NLElBUE4sRUFPWSxJQVBaLEVBT2tCLElBUGxCLEVBT3dCLElBUHhCLEVBTzhCLElBUDlCLEVBT29DLElBUHBDLEVBTzBDLElBUDFDLEVBT2dELElBUGhELEVBUU4sSUFSTSxFQVFBLElBUkEsRUFRTSxJQVJOLEVBUVksSUFSWixFQVFrQixJQVJsQixFQVF3QixJQVJ4QixFQVE4QixJQVI5QixFQVFvQyxJQVJwQyxFQVEwQyxJQVIxQyxFQVFnRCxJQVJoRCxFQVNOLElBVE0sRUFTQSxJQVRBLEVBU00sSUFUTixFQVNZLElBVFosRUFTa0IsSUFUbEIsRUFTd0IsSUFUeEIsRUFTOEIsSUFUOUIsRUFTb0MsSUFUcEMsRUFTMEMsSUFUMUMsRUFTZ0QsSUFUaEQsRUFVTixJQVZNLEVBVUEsSUFWQSxFQVVNLElBVk4sRUFVWSxJQVZaLEVBVWtCLElBVmxCLEVBVXdCLElBVnhCLEVBVThCLElBVjlCLEVBVW9DLElBVnBDLENBQVAsQ0FMRCxDQWlCQztBQUNBLEdBbEJhOztBQW9CUCxFQUFBLHdCQUFBLENBQUEsU0FBQSxDQUFBLGNBQUEsR0FBUCxZQUFBO0FBQ0MsV0FBTyxJQUFQO0FBQ0EsR0FGTTs7QUFJQSxFQUFBLHdCQUFBLENBQUEsU0FBQSxDQUFBLGtCQUFBLEdBQVAsWUFBQTtBQUNDLFdBQU8sR0FBUDtBQUNBLEdBRk07O0FBUUcsRUFBQSx3QkFBQSxDQUFBLFNBQUEsQ0FBQSxPQUFBLEdBQVYsVUFBa0IsSUFBbEIsRUFBd0M7QUFDdkMsV0FBTyxJQUFJLElBQUksS0FBSyxnQkFBYixHQUFnQyxLQUFLLGdCQUFMLENBQXNCLElBQXRCLENBQWhDLEdBQThELElBQXJFO0FBQ0EsR0FGUzs7QUFHWCxTQUFBLHdCQUFBO0FBQUMsQ0F4Q0QsQ0FBdUQsMEJBQXZELENBQUE7Ozs7QUEwQ0E7O0FBRUc7QUFDSCxJQUFBLGdCQUFBO0FBQUE7QUFBQSxVQUFBLE1BQUEsRUFBQTtBQUFzQyxFQUFBLFNBQUEsQ0FBQSxnQkFBQSxFQUFBLE1BQUEsQ0FBQTs7QUFBdEMsV0FBQSxnQkFBQSxHQUFBO0FBQUEsUUFBQSxLQUFBLEdBQUEsTUFBQSxLQUFBLElBQUEsSUFBQSxNQUFBLENBQUEsS0FBQSxDQUFBLElBQUEsRUFBQSxTQUFBLENBQUEsSUFBQSxJQUFBOztBQTREUyxJQUFBLEtBQUEsQ0FBQSxnQkFBQSxHQUFtQixVQUFDLElBQUQsRUFBYTtBQUN2QyxVQUFNLEdBQUcsR0FBRyxJQUFJLGlCQUFKLEdBQWdCLGVBQWhCLENBQWdDLElBQWhDLENBQVo7O0FBQ0EsVUFBTSxLQUFLLEdBQUcsZUFBTSxNQUFOLENBQWEsK0JBQWIsRUFBOEMsR0FBOUMsQ0FBZDs7QUFDQSxhQUFPLEtBQUssQ0FBQyxHQUFOLENBQVUsVUFBQyxJQUFELEVBQUs7QUFBSyxlQUFBLElBQUksQ0FBSixRQUFBLEVBQUE7QUFBZSxPQUFuQyxFQUFxQyxJQUFyQyxDQUEwQyxHQUExQyxDQUFQO0FBQ0EsS0FKTzs7O0FBc0dSOztBQS9KTyxFQUFBLGdCQUFBLENBQUEsU0FBQSxDQUFBLG1CQUFBLEdBQVAsVUFBMkIsSUFBM0IsRUFBa0Q7QUFDakQsUUFBSSxLQUFLLENBQUMsT0FBTixDQUFjLElBQWQsQ0FBSixFQUF5QjtBQUN4QixVQUFNLFdBQVcsR0FBRyxLQUFLLGNBQUwsQ0FBb0IsSUFBcEIsRUFBMEIsSUFBMUIsQ0FBK0IsRUFBL0IsQ0FBcEI7QUFDQSxVQUFNLEtBQUssR0FBRyxXQUFXLENBQUMsTUFBWixHQUFxQixLQUFLLGNBQUwsRUFBbkM7QUFDQSxhQUFPLEtBQUssR0FBRyxDQUFSLEdBQVksS0FBWixHQUFvQixDQUEzQjtBQUNBLEtBSkQsTUFJTztBQUNOLFVBQU0sS0FBSyxHQUFHLElBQUksQ0FBQyxNQUFMLEdBQWMsS0FBSyxjQUFMLEVBQTVCO0FBQ0EsYUFBTyxLQUFLLEdBQUcsQ0FBUixHQUFZLEtBQVosR0FBb0IsQ0FBM0I7QUFDQTtBQUNELEdBVE07O0FBV0EsRUFBQSxnQkFBQSxDQUFBLFNBQUEsQ0FBQSxTQUFBLEdBQVAsVUFBaUIsSUFBakIsRUFBK0IsSUFBL0IsRUFBdUQsRUFBdkQsRUFBbUU7QUFBbkUsUUFBQSxLQUFBLEdBQUEsSUFBQTs7QUFDQyxXQUFPLHFCQUFTLElBQVQsRUFBZSxJQUFmLENBQW9CLFVBQUMsRUFBRCxFQUFjO1VBQUosRUFBRSxHQUFBLEVBQUEsQ0FBQSxLO0FBQ3RDLFVBQU0sT0FBTyxHQUFHLGlEQUFoQjtBQUVBLFVBQU0sSUFBSSxHQUFHO0FBQ1osUUFBQSxNQUFNLEVBQUUsR0FESTtBQUVaLFFBQUEsRUFBRSxFQUFFLEtBQUksQ0FBQyxPQUFMLENBQWEsSUFBYixDQUZRO0FBR1osUUFBQSxFQUFFLEVBQUUsS0FBSSxDQUFDLE9BQUwsQ0FBYSxFQUFiLENBSFE7QUFJWixRQUFBLEVBQUUsRUFBRSxLQUFJLENBQUMsT0FBTCxDQUFhLEVBQWIsQ0FKUTtBQUtaLFFBQUEsRUFBRSxFQUFFLENBQUMsSUFBRCxFQUFPLElBQVAsRUFBYSxJQUFiLEVBQW1CLElBQW5CLEVBQXlCLElBQXpCLEVBQStCLEtBQS9CLEVBQXNDLElBQXRDLEVBQTRDLElBQTVDLEVBQWtELElBQWxELEVBQXdELEdBQXhELENBTFE7QUFNWixRQUFBLEVBQUUsRUFBRSxPQU5RO0FBT1osUUFBQSxFQUFFLEVBQUUsT0FQUTtBQVFaLFFBQUEsR0FBRyxFQUFFLENBUk87QUFTWixRQUFBLElBQUksRUFBRSxDQVRNO0FBVVosUUFBQSxJQUFJLEVBQUUsQ0FWTTtBQVdaLFFBQUEsRUFBRSxFQUFFLENBWFE7QUFZWixRQUFBLENBQUMsRUFBRSxJQVpTO0FBYVosUUFBQSxFQUFFLEVBQUE7QUFiVSxPQUFiO0FBZ0JBLFVBQU0sR0FBRyxHQUFHLE9BQU8sR0FBRyxHQUFWLEdBQWdCLDRCQUFVLElBQVYsQ0FBNUI7QUFFQSxhQUFPLGVBQ0wsR0FESyxDQUNELEtBQUksQ0FBQyxrQkFBTCxDQUF3QixHQUF4QixDQURDLEVBQzZCO0FBQ2xDLFFBQUEsZUFBZSxFQUFFLEtBRGlCO0FBRWxDLFFBQUEsT0FBTyxFQUFFLEtBQUksQ0FBQyxPQUFMLENBQWE7QUFGWSxPQUQ3QixFQUtMLElBTEssQ0FLQSxVQUFDLEdBQUQsRUFBSTtBQUFLLGVBQUEsR0FBRyxDQUFILElBQUE7QUFBUSxPQUxqQixFQU1MLElBTkssQ0FNQSxVQUFDLEdBQUQsRUFBSTtBQUNULFlBQUksRUFBRSxHQUFHLFlBQVksS0FBakIsS0FBMkIsRUFBRSxHQUFHLENBQUMsQ0FBRCxDQUFILFlBQWtCLEtBQXBCLENBQS9CLEVBQTJEO0FBQzFELGdCQUFNLElBQUksS0FBSixDQUFVLHFCQUFWLENBQU47QUFDQTs7QUFFRCxZQUFNLGNBQWMsR0FBRyxHQUFHLENBQUMsQ0FBRCxDQUFILENBQ3JCLEdBRHFCLENBQ2pCLFVBQUMsS0FBRCxFQUFNO0FBQ1YsaUJBQUEsS0FBSyxZQUFZLEtBQWpCLElBQTBCLE9BQU8sS0FBSyxDQUFDLENBQUQsQ0FBWixLQUFvQixRQUE5QyxHQUNHLEtBQUssQ0FBQyxDQUFELENBRFIsR0FFRyxFQUZIO0FBRUssU0FKZ0IsRUFNckIsSUFOcUIsQ0FNaEIsRUFOZ0IsQ0FBdkI7QUFRQSxlQUFPLGNBQVA7QUFDQSxPQXBCSyxDQUFQO0FBcUJBLEtBMUNNLENBQVA7QUEyQ0EsR0E1Q007O0FBb0RBLEVBQUEsZ0JBQUEsQ0FBQSxTQUFBLENBQUEsY0FBQSxHQUFQLFVBQXNCLElBQXRCLEVBQXNDLElBQXRDLEVBQThELEVBQTlELEVBQTBFO0FBQTFFLFFBQUEsS0FBQSxHQUFBLElBQUE7O0FBQ0MsUUFBTSxZQUFZLEdBQUcsS0FBSyxjQUFMLENBQW9CLElBQXBCLENBQXJCO0FBQ0EsV0FBTyxxQkFBUyxZQUFZLENBQUMsSUFBYixDQUFrQixFQUFsQixDQUFULEVBQWdDLElBQWhDLENBQXFDLFVBQUMsRUFBRCxFQUFjO1VBQUosRUFBRSxHQUFBLEVBQUEsQ0FBQSxLO0FBQ3ZELFVBQU0sT0FBTyxHQUFHLGdEQUFoQjtBQUVBLFVBQU0sSUFBSSxHQUFHO0FBQ1osUUFBQSxJQUFJLEVBQUUsQ0FETTtBQUVaLFFBQUEsTUFBTSxFQUFFLElBRkk7QUFHWixRQUFBLENBQUMsRUFBRSxLQUhTO0FBSVosUUFBQSxNQUFNLEVBQUUsTUFKSTtBQUtaLFFBQUEsRUFBRSxFQUFFLEtBQUksQ0FBQyxPQUFMLENBQWEsSUFBYixDQUxRO0FBTVosUUFBQSxFQUFFLEVBQUUsS0FBSSxDQUFDLE9BQUwsQ0FBYSxFQUFiLENBTlE7QUFPWixRQUFBLEVBQUUsRUFBQTtBQVBVLE9BQWI7QUFVQSxVQUFNLEdBQUcsR0FBRyxPQUFPLEdBQUcsR0FBVixHQUFnQiw0QkFBVSxJQUFWLENBQTVCO0FBQ0EsVUFBTSxJQUFJLEdBQUcsWUFBWSxDQUN2QixHQURXLENBQ1AsVUFBQyxJQUFELEVBQUs7QUFBSyxlQUFBLE1BQUEsTUFBQSxDQUFNLGtCQUFrQixDQUF4QixJQUF3QixDQUF4QixDQUFBO0FBQWdDLE9BRG5DLEVBRVgsSUFGVyxDQUVOLEVBRk0sQ0FBYjtBQUlBLGFBQU8sb0JBQU07QUFDWixRQUFBLEdBQUcsRUFBRSxLQUFJLENBQUMsa0JBQUwsQ0FBd0IsR0FBeEIsQ0FETztBQUVaLFFBQUEsTUFBTSxFQUFFLE1BRkk7QUFHWixRQUFBLGVBQWUsRUFBRSxLQUhMO0FBSVosUUFBQSxPQUFPLEVBQUEsUUFBQSxDQUFBO0FBQ04sMEJBQWdCO0FBRFYsU0FBQSxFQUVILEtBQUksQ0FBQyxPQUFMLENBQWEsT0FGVixDQUpLO0FBUVosUUFBQSxJQUFJLEVBQUU7QUFSTSxPQUFOLEVBVUwsSUFWSyxDQVVBLFVBQUMsR0FBRCxFQUFJO0FBQUssZUFBQSxHQUFHLENBQUgsSUFBQTtBQUFRLE9BVmpCLEVBV0wsSUFYSyxDQVdBLFVBQUMsT0FBRCxFQUFRO0FBQ2IsWUFBSSxJQUFJLEdBQUcsT0FBWDs7QUFDQSxZQUFJLElBQUksQ0FBQyxNQUFMLElBQWUsQ0FBbkIsRUFBc0I7QUFDckI7QUFDQSxVQUFBLElBQUksR0FBRyxDQUFDLE9BQUQsQ0FBUDtBQUNBOztBQUVELFlBQUksQ0FBQyxLQUFLLENBQUMsT0FBTixDQUFjLElBQWQsQ0FBTCxFQUEwQjtBQUN6QixnQkFBTSxJQUFJLEtBQUosQ0FBVSxxQkFBVixDQUFOO0FBQ0E7O0FBRUQsWUFBTSxNQUFNLEdBQXNCLEVBQWxDLENBWGEsQ0FhYjs7QUFDQSxRQUFBLElBQUksQ0FBQyxPQUFMLENBQWEsVUFBQyxLQUFELEVBQU07QUFDbEIsY0FBSSxjQUFjLEdBQUcsRUFBckI7O0FBRUEsY0FBSSxJQUFJLEtBQUssTUFBYixFQUFxQjtBQUNwQjtBQUNBLGdCQUFJLENBQUMsS0FBSyxDQUFDLE9BQU4sQ0FBYyxLQUFkLENBQUQsSUFBeUIsT0FBTyxLQUFLLENBQUMsQ0FBRCxDQUFaLEtBQW9CLFFBQWpELEVBQTJEO0FBQzFELG9CQUFNLElBQUksS0FBSixDQUFVLHFCQUFWLENBQU47QUFDQTs7QUFFRCxZQUFBLGNBQWMsR0FBRyxLQUFLLENBQUMsQ0FBRCxDQUF0QjtBQUNBLFdBUEQsTUFPTztBQUNOO0FBQ0EsZ0JBQUksT0FBTyxLQUFQLEtBQWlCLFFBQXJCLEVBQStCO0FBQzlCLG9CQUFNLElBQUksS0FBSixDQUFVLHFCQUFWLENBQU47QUFDQTs7QUFFRCxZQUFBLGNBQWMsR0FBRyxLQUFqQjtBQUNBLFdBakJpQixDQW1CbEI7OztBQUNBLGNBQUksaUJBQWlCLEdBQWtCLElBQXZDOztBQUNBLGNBQUk7QUFDSCxZQUFBLGlCQUFpQixHQUFHLEtBQUksQ0FBQyxnQkFBTCxDQUFzQixjQUF0QixDQUFwQjtBQUNBLFdBRkQsQ0FFRSxPQUFPLEtBQVAsRUFBYyxDQUFFLENBdkJBLENBeUJsQjs7O0FBQ0EsY0FDQyxpQkFBaUIsS0FBSyxJQUF0QixJQUNBLGlCQUFpQixDQUFDLE1BQWxCLEtBQTZCLENBRjlCLEVBR0U7QUFDRDtBQUNBLFlBQUEsTUFBTSxDQUFDLElBQVAsQ0FBWSxJQUFaO0FBQ0EsV0FORCxNQU1PO0FBQ04sWUFBQSxNQUFNLENBQUMsSUFBUCxDQUFZLGlCQUFaO0FBQ0E7QUFDRCxTQW5DRDs7QUFxQ0EsWUFBSSxNQUFNLENBQUMsTUFBUCxLQUFrQixJQUFJLENBQUMsTUFBM0IsRUFBbUM7QUFDbEMsZ0JBQU0sSUFBSSxLQUFKLENBQ0wseURBREssQ0FBTjtBQUdBOztBQUVELGVBQU8sTUFBUDtBQUNBLE9BckVLLENBQVA7QUFzRUEsS0F4Rk0sQ0FBUDtBQXlGQSxHQTNGTTs7QUE2RkMsRUFBQSxnQkFBQSxDQUFBLFNBQUEsQ0FBQSxjQUFBLEdBQVIsVUFBdUIsUUFBdkIsRUFBeUM7QUFDeEMsV0FBTyxRQUFRLENBQUMsR0FBVCxDQUFhLFVBQUMsSUFBRCxFQUFPLENBQVAsRUFBUTtBQUFLLGFBQUEsZUFBQSxNQUFBLENBQWMsQ0FBZCxFQUFlLEtBQWYsRUFBZSxNQUFmLENBQW9CLElBQXBCLEVBQUEsWUFBQSxDQUFBO0FBQW9DLEtBQTlELENBQVA7QUFDQSxHQUZPOztBQTlKZSxFQUFBLGdCQUFBLENBQUEsY0FBQSxHQUFpQixrQkFBakI7QUFpS3hCLFNBQUEsZ0JBQUE7QUFBQyxDQWxLRCxDQUFzQyx3QkFBdEMsQ0FBQTs7OztBQW9LQTs7QUFFRztBQUNILElBQUEseUJBQUE7QUFBQTtBQUFBLFVBQUEsTUFBQSxFQUFBO0FBQStDLEVBQUEsU0FBQSxDQUFBLHlCQUFBLEVBQUEsTUFBQSxDQUFBOztBQUEvQyxXQUFBLHlCQUFBLEdBQUE7QUFBQSxRQUFBLEtBQUEsR0FBQSxNQUFBLEtBQUEsSUFBQSxJQUFBLE1BQUEsQ0FBQSxLQUFBLENBQUEsSUFBQSxFQUFBLFNBQUEsQ0FBQSxJQUFBLElBQUE7O0FBR1EsSUFBQSxLQUFBLENBQUEsU0FBQSxHQUFZLFVBQU8sSUFBUCxFQUFxQixJQUFyQixFQUE2QyxFQUE3QyxFQUF5RDtBQUFBLGFBQUEsU0FBQSxDQUFBLEtBQUEsRUFBQSxLQUFBLENBQUEsRUFBQSxLQUFBLENBQUEsRUFBQSxZQUFBOzs7Ozs7QUFDckQscUJBQUEsQ0FBQTtBQUFBO0FBQUEsZ0JBQU0sS0FBSyxjQUFMLENBQW9CLENBQUMsSUFBRCxDQUFwQixFQUE0QixJQUE1QixFQUFrQyxFQUFsQyxDQUFOLENBQUE7OztBQUFoQixjQUFBLEVBQUEsR0FBQSxNQUFBLENBQUEsS0FBQSxDQUFBLEtBQUEsQ0FBQSxFQUFBLENBQWdCLEVBQUEsQ0FBQSxJQUFBLEVBQWhCLEVBQTJELENBQTNELENBQUEsQ0FBQSxFQUFDLFdBQVcsR0FBQSxFQUFBLENBQUEsQ0FBQSxDQUFaO0FBQ04scUJBQUEsQ0FBQTtBQUFBO0FBQUEsZ0JBQU8sV0FBUCxDQUFBOzs7T0FGMkUsQ0FBQTtBQUczRSxLQUhNOzs7QUF3RVA7O0FBbkVPLEVBQUEseUJBQUEsQ0FBQSxTQUFBLENBQUEsY0FBQSxHQUFQLFVBQXNCLElBQXRCLEVBQXNDLElBQXRDLEVBQThELEVBQTlELEVBQTBFO0FBQ3pFLFFBQU0sT0FBTyxHQUFHLGdEQUFoQjtBQUVBLFFBQU0sSUFBSSxHQUFHO0FBQ1osTUFBQSxNQUFNLEVBQUUsZ0JBREk7QUFFWixNQUFBLEVBQUUsRUFBRSxLQUFLLE9BQUwsQ0FBYSxJQUFiLENBRlE7QUFHWixNQUFBLEVBQUUsRUFBRSxLQUFLLE9BQUwsQ0FBYSxFQUFiLENBSFE7QUFJWixNQUFBLENBQUMsRUFBRTtBQUpTLEtBQWI7QUFPQSxRQUFNLEdBQUcsR0FBRyxPQUFPLEdBQUcsR0FBVixHQUFnQiw0QkFBVSxJQUFWLENBQTVCO0FBRUEsV0FBTyxvQkFBTTtBQUNaLE1BQUEsR0FBRyxFQUFFLEtBQUssa0JBQUwsQ0FBd0IsR0FBeEIsQ0FETztBQUVaLE1BQUEsTUFBTSxFQUFFLEtBRkk7QUFHWixNQUFBLGVBQWUsRUFBRSxLQUhMO0FBSVosTUFBQSxPQUFPLEVBQUEsUUFBQSxDQUFBO0FBQ04sd0JBQWdCO0FBRFYsT0FBQSxFQUVILEtBQUssT0FBTCxDQUFhLE9BRlY7QUFKSyxLQUFOLEVBU0wsSUFUSyxDQVNBLFVBQUMsR0FBRCxFQUFJO0FBQUssYUFBQSxHQUFHLENBQUgsSUFBQTtBQUFRLEtBVGpCLEVBVUwsSUFWSyxDQVVBLFVBQUMsT0FBRCxFQUFRO0FBQ2IsVUFBSSxJQUFJLENBQUMsTUFBTCxHQUFjLENBQWQsSUFBbUIsS0FBSyxDQUFDLE9BQU4sQ0FBYyxPQUFkLENBQXZCLEVBQStDO0FBQzlDO0FBQ0EsWUFBTSxVQUFVLEdBQUcsT0FBTyxDQUFDLENBQUQsQ0FBMUI7O0FBQ0EsWUFBSSxDQUFDLEtBQUssQ0FBQyxPQUFOLENBQWMsVUFBZCxDQUFELElBQThCLFVBQVUsQ0FBQyxNQUFYLEtBQXNCLElBQUksQ0FBQyxNQUE3RCxFQUFxRTtBQUNwRSxnQkFBTSxJQUFJLFNBQUosQ0FBYyxrQkFBZCxDQUFOO0FBQ0E7O0FBRUQsZUFBTyxVQUFVLENBQUMsR0FBWCxDQUFlLFVBQUMsSUFBRCxFQUFLO0FBQzFCLGNBQU0sR0FBRyxHQUFHLDZCQUFpQixJQUFqQixFQUF1QixDQUF2QixDQUFaOztBQUNBLGNBQUksT0FBTyxHQUFQLEtBQWUsUUFBbkIsRUFBNkI7QUFDNUIsa0JBQU0sSUFBSSxTQUFKLENBQWMsbUJBQWQsQ0FBTjtBQUNBOztBQUVELGlCQUFPLEdBQVA7QUFDQSxTQVBNLENBQVA7QUFRQSxPQWZELE1BZU8sSUFDTixJQUFJLENBQUMsTUFBTCxLQUFnQixDQUFoQixJQUNBLE9BQU8sT0FBUCxLQUFtQixRQURuQixJQUVBLE9BQU8sS0FBSyxJQUZaLElBR0EsZUFBZSxPQUpULEVBS0w7QUFDRDtBQUNBLFlBQU0sU0FBUyxHQUFJLE9BQWUsQ0FBQyxTQUFuQzs7QUFDQSxZQUFJLENBQUMsS0FBSyxDQUFDLE9BQU4sQ0FBYyxTQUFkLENBQUwsRUFBK0I7QUFDOUIsZ0JBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBOztBQUVELFlBQU0sY0FBYyxHQUFHLFNBQVMsQ0FDOUIsS0FEcUIsQ0FDZixDQURlLEVBQ1osQ0FBQyxDQURXLEVBRXJCLEdBRnFCLENBRWpCLFVBQUMsUUFBRCxFQUFTO0FBQ2IsY0FBSSxPQUFPLFFBQVAsS0FBb0IsUUFBcEIsSUFBZ0MsRUFBRSxXQUFXLFFBQWIsQ0FBcEMsRUFBNEQ7QUFDM0Qsa0JBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBOztBQUVELGlCQUFPLFFBQVEsQ0FBQyxLQUFoQjtBQUNBLFNBUnFCLEVBU3JCLElBVHFCLENBU2hCLEVBVGdCLENBQXZCO0FBV0EsZUFBTyxDQUFDLGNBQUQsQ0FBUDtBQUNBOztBQUVELFlBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBLEtBckRLLENBQVA7QUFzREEsR0FsRU07O0FBUGdCLEVBQUEseUJBQUEsQ0FBQSxjQUFBLEdBQWlCLDJCQUFqQjtBQTBFeEIsU0FBQSx5QkFBQTtBQUFDLENBM0VELENBQStDLHdCQUEvQyxDQUFBIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IGF4aW9zIGZyb20gJ2F4aW9zJztcbmltcG9ydCB7IHN0cmluZ2lmeSB9IGZyb20gJ3F1ZXJ5LXN0cmluZyc7XG5pbXBvcnQgeHBhdGggZnJvbSAneHBhdGgnO1xuaW1wb3J0IHsgRE9NUGFyc2VyIH0gZnJvbSAneG1sZG9tJztcblxuaW1wb3J0IHsgbGFuZ0NvZGUsIGxhbmdDb2RlV2l0aEF1dG8sIEJhc2VUcmFuc2xhdG9yIH0gZnJvbSAnLi4vLi4vdHlwZXMvVHJhbnNsYXRvcic7XG5pbXBvcnQgeyBnZXRUb2tlbiB9IGZyb20gJy4vdG9rZW4nO1xuaW1wb3J0IHsgZGVlcEV4cGxvcmVBcnJheSB9IGZyb20gJy4vdXRpbHMnO1xuXG4vKipcbiAqIENvbW1vbiBjbGFzcyBmb3IgZ29vZ2xlIHRyYW5zbGF0b3IgaW1wbGVtZW50YXRpb25zXG4gKi9cbmV4cG9ydCBhYnN0cmFjdCBjbGFzcyBBYnN0cmFjdEdvb2dsZVRyYW5zbGF0b3IgZXh0ZW5kcyBCYXNlVHJhbnNsYXRvciB7XG5cdHB1YmxpYyBzdGF0aWMgaXNTdXBwb3J0ZWRBdXRvRnJvbSgpIHtcblx0XHRyZXR1cm4gdHJ1ZTtcblx0fVxuXG5cdHB1YmxpYyBzdGF0aWMgZ2V0U3VwcG9ydGVkTGFuZ3VhZ2VzKCk6IGxhbmdDb2RlW10ge1xuXHRcdC8vIFN1cHBvcnRlZCwgYnV0IG5vdCB2YWxpZCBsYW5ndWFnZXMgW1wiemgtY25cIiwgXCJ6aC10d1wiLCAnY2ViJywgJ2hhdycsICdpdycsICdobW4nLCAnancnLCAnbWEnXVxuXG5cdFx0Ly8gZXNsaW50LWRpc2FibGVcblx0XHQvLyBwcmV0dGllci1pZ25vcmVcblx0XHRyZXR1cm4gW1xuXHRcdFx0J2FmJywgJ3NxJywgJ2FtJywgJ2FyJywgJ2h5JywgJ2F6JywgJ2V1JywgJ2JlJywgJ2JuJywgJ2JzJyxcblx0XHRcdCdiZycsICdjYScsICdueScsICdjbycsICdocicsICdjcycsICdkYScsICdubCcsICdlbicsICdlbycsXG5cdFx0XHQnZXQnLCAndGwnLCAnZmknLCAnZnInLCAnZnknLCAnZ2wnLCAna2EnLCAnZGUnLCAnZWwnLCAnZ3UnLFxuXHRcdFx0J2h0JywgJ2hhJywgJ2hpJywgJ2h1JywgJ2lzJywgJ2lnJywgJ2lkJywgJ2dhJywgJ2l0JywgJ2phJyxcblx0XHRcdCdrbicsICdraycsICdrbScsICdrbycsICdrdScsICdreScsICdsbycsICdsYScsICdsdicsICdsdCcsXG5cdFx0XHQnbGInLCAnbWsnLCAnbWcnLCAnbXMnLCAnbWwnLCAnbXQnLCAnbWknLCAnbXInLCAnbW4nLCAnbXknLFxuXHRcdFx0J25lJywgJ25vJywgJ3BzJywgJ2ZhJywgJ3BsJywgJ3B0JywgJ3BhJywgJ3JvJywgJ3J1JywgJ3NtJyxcblx0XHRcdCdnZCcsICdzcicsICdzdCcsICdzbicsICdzZCcsICdzaScsICdzaycsICdzbCcsICdzbycsICdlcycsXG5cdFx0XHQnc3UnLCAnc3cnLCAnc3YnLCAndGcnLCAndGEnLCAndGUnLCAndGgnLCAndHInLCAndWsnLCAndXInLFxuXHRcdFx0J3V6JywgJ3ZpJywgJ2N5JywgJ3hoJywgJ3lpJywgJ3lvJywgJ3p1JywgJ3poJyxcblx0XHRdO1xuXHRcdC8vIGVzbGludC1lbmFibGVcblx0fVxuXG5cdHB1YmxpYyBnZXRMZW5ndGhMaW1pdCgpIHtcblx0XHRyZXR1cm4gNDAwMDtcblx0fVxuXG5cdHB1YmxpYyBnZXRSZXF1ZXN0c1RpbWVvdXQoKSB7XG5cdFx0cmV0dXJuIDMwMDtcblx0fVxuXG5cdHByb3RlY3RlZCByZWFkb25seSBsYW5nUmVwbGFjZW1lbnRzOiBSZWNvcmQ8c3RyaW5nLCBzdHJpbmc+ID0ge1xuXHRcdHpoOiAnemgtY24nLFxuXHR9O1xuXG5cdHByb3RlY3RlZCBmaXhMYW5nKGxhbmc6IGxhbmdDb2RlV2l0aEF1dG8pIHtcblx0XHRyZXR1cm4gbGFuZyBpbiB0aGlzLmxhbmdSZXBsYWNlbWVudHMgPyB0aGlzLmxhbmdSZXBsYWNlbWVudHNbbGFuZ10gOiBsYW5nO1xuXHR9XG59XG5cbi8qKlxuICogVHJhbnNsYXRvciBpbXBsZW1lbnRhdGlvbiB3aGljaCB1c2UgR29vZ2xlIEFQSSB3aXRoIHRva2VuIGZyb20gaHR0cHM6Ly90cmFuc2xhdGUuZ29vZ2xlLmNvbVxuICovXG5leHBvcnQgY2xhc3MgR29vZ2xlVHJhbnNsYXRvciBleHRlbmRzIEFic3RyYWN0R29vZ2xlVHJhbnNsYXRvciB7XG5cdHB1YmxpYyBzdGF0aWMgcmVhZG9ubHkgdHJhbnNsYXRvck5hbWUgPSAnR29vZ2xlVHJhbnNsYXRvcic7XG5cblx0cHVibGljIGNoZWNrTGltaXRFeGNlZWRpbmcodGV4dDogc3RyaW5nIHwgc3RyaW5nW10pIHtcblx0XHRpZiAoQXJyYXkuaXNBcnJheSh0ZXh0KSkge1xuXHRcdFx0Y29uc3QgZW5jb2RlZFRleHQgPSB0aGlzLmVuY29kZUZvckJhdGNoKHRleHQpLmpvaW4oJycpO1xuXHRcdFx0Y29uc3QgZXh0cmEgPSBlbmNvZGVkVGV4dC5sZW5ndGggLSB0aGlzLmdldExlbmd0aExpbWl0KCk7XG5cdFx0XHRyZXR1cm4gZXh0cmEgPiAwID8gZXh0cmEgOiAwO1xuXHRcdH0gZWxzZSB7XG5cdFx0XHRjb25zdCBleHRyYSA9IHRleHQubGVuZ3RoIC0gdGhpcy5nZXRMZW5ndGhMaW1pdCgpO1xuXHRcdFx0cmV0dXJuIGV4dHJhID4gMCA/IGV4dHJhIDogMDtcblx0XHR9XG5cdH1cblxuXHRwdWJsaWMgdHJhbnNsYXRlKHRleHQ6IHN0cmluZywgZnJvbTogbGFuZ0NvZGVXaXRoQXV0bywgdG86IGxhbmdDb2RlKSB7XG5cdFx0cmV0dXJuIGdldFRva2VuKHRleHQpLnRoZW4oKHsgdmFsdWU6IHRrIH0pID0+IHtcblx0XHRcdGNvbnN0IGFwaVBhdGggPSAnaHR0cHM6Ly90cmFuc2xhdGUuZ29vZ2xlLmNvbS90cmFuc2xhdGVfYS9zaW5nbGUnO1xuXG5cdFx0XHRjb25zdCBkYXRhID0ge1xuXHRcdFx0XHRjbGllbnQ6ICd0Jyxcblx0XHRcdFx0c2w6IHRoaXMuZml4TGFuZyhmcm9tKSxcblx0XHRcdFx0dGw6IHRoaXMuZml4TGFuZyh0byksXG5cdFx0XHRcdGhsOiB0aGlzLmZpeExhbmcodG8pLFxuXHRcdFx0XHRkdDogWydhdCcsICdiZCcsICdleCcsICdsZCcsICdtZCcsICdxY2EnLCAncncnLCAncm0nLCAnc3MnLCAndCddLFxuXHRcdFx0XHRpZTogJ1VURi04Jyxcblx0XHRcdFx0b2U6ICdVVEYtOCcsXG5cdFx0XHRcdG90ZjogMSxcblx0XHRcdFx0c3NlbDogMCxcblx0XHRcdFx0dHNlbDogMCxcblx0XHRcdFx0a2M6IDcsXG5cdFx0XHRcdHE6IHRleHQsXG5cdFx0XHRcdHRrLFxuXHRcdFx0fTtcblxuXHRcdFx0Y29uc3QgdXJsID0gYXBpUGF0aCArICc/JyArIHN0cmluZ2lmeShkYXRhKTtcblxuXHRcdFx0cmV0dXJuIGF4aW9zXG5cdFx0XHRcdC5nZXQodGhpcy53cmFwVXJsVG9Db3JzUHJveHkodXJsKSwge1xuXHRcdFx0XHRcdHdpdGhDcmVkZW50aWFsczogZmFsc2UsXG5cdFx0XHRcdFx0aGVhZGVyczogdGhpcy5vcHRpb25zLmhlYWRlcnMsXG5cdFx0XHRcdH0pXG5cdFx0XHRcdC50aGVuKChyc3ApID0+IHJzcC5kYXRhKVxuXHRcdFx0XHQudGhlbigocnNwKSA9PiB7XG5cdFx0XHRcdFx0aWYgKCEocnNwIGluc3RhbmNlb2YgQXJyYXkpIHx8ICEocnNwWzBdIGluc3RhbmNlb2YgQXJyYXkpKSB7XG5cdFx0XHRcdFx0XHR0aHJvdyBuZXcgRXJyb3IoJ1VuZXhwZWN0ZWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRjb25zdCB0cmFuc2xhdGVkVGV4dCA9IHJzcFswXVxuXHRcdFx0XHRcdFx0Lm1hcCgoY2h1bmspID0+XG5cdFx0XHRcdFx0XHRcdGNodW5rIGluc3RhbmNlb2YgQXJyYXkgJiYgdHlwZW9mIGNodW5rWzBdID09PSAnc3RyaW5nJ1xuXHRcdFx0XHRcdFx0XHRcdD8gY2h1bmtbMF1cblx0XHRcdFx0XHRcdFx0XHQ6ICcnLFxuXHRcdFx0XHRcdFx0KVxuXHRcdFx0XHRcdFx0LmpvaW4oJycpO1xuXG5cdFx0XHRcdFx0cmV0dXJuIHRyYW5zbGF0ZWRUZXh0O1xuXHRcdFx0XHR9KTtcblx0XHR9KTtcblx0fVxuXG5cdHByaXZhdGUgcGFyc2VYTUxSZXNwb25zZSA9ICh0ZXh0OiBzdHJpbmcpID0+IHtcblx0XHRjb25zdCBkb2MgPSBuZXcgRE9NUGFyc2VyKCkucGFyc2VGcm9tU3RyaW5nKHRleHQpO1xuXHRcdGNvbnN0IG5vZGVzID0geHBhdGguc2VsZWN0KCcvL3ByZS8qW25vdChzZWxmOjppKV0vL3RleHQoKScsIGRvYyk7XG5cdFx0cmV0dXJuIG5vZGVzLm1hcCgobm9kZSkgPT4gbm9kZS50b1N0cmluZygpKS5qb2luKCcgJyk7XG5cdH07XG5cblx0cHVibGljIHRyYW5zbGF0ZUJhdGNoKHRleHQ6IHN0cmluZ1tdLCBmcm9tOiBsYW5nQ29kZVdpdGhBdXRvLCB0bzogbGFuZ0NvZGUpIHtcblx0XHRjb25zdCBwcmVwYXJlZFRleHQgPSB0aGlzLmVuY29kZUZvckJhdGNoKHRleHQpO1xuXHRcdHJldHVybiBnZXRUb2tlbihwcmVwYXJlZFRleHQuam9pbignJykpLnRoZW4oKHsgdmFsdWU6IHRrIH0pID0+IHtcblx0XHRcdGNvbnN0IGFwaVBhdGggPSAnaHR0cHM6Ly90cmFuc2xhdGUuZ29vZ2xlYXBpcy5jb20vdHJhbnNsYXRlX2EvdCc7XG5cblx0XHRcdGNvbnN0IGRhdGEgPSB7XG5cdFx0XHRcdGFubm86IDMsXG5cdFx0XHRcdGNsaWVudDogJ3RlJyxcblx0XHRcdFx0djogJzEuMCcsXG5cdFx0XHRcdGZvcm1hdDogJ2h0bWwnLFxuXHRcdFx0XHRzbDogdGhpcy5maXhMYW5nKGZyb20pLFxuXHRcdFx0XHR0bDogdGhpcy5maXhMYW5nKHRvKSxcblx0XHRcdFx0dGssXG5cdFx0XHR9O1xuXG5cdFx0XHRjb25zdCB1cmwgPSBhcGlQYXRoICsgJz8nICsgc3RyaW5naWZ5KGRhdGEpO1xuXHRcdFx0Y29uc3QgYm9keSA9IHByZXBhcmVkVGV4dFxuXHRcdFx0XHQubWFwKCh0ZXh0KSA9PiBgJnE9JHtlbmNvZGVVUklDb21wb25lbnQodGV4dCl9YClcblx0XHRcdFx0LmpvaW4oJycpO1xuXG5cdFx0XHRyZXR1cm4gYXhpb3Moe1xuXHRcdFx0XHR1cmw6IHRoaXMud3JhcFVybFRvQ29yc1Byb3h5KHVybCksXG5cdFx0XHRcdG1ldGhvZDogJ1BPU1QnLFxuXHRcdFx0XHR3aXRoQ3JlZGVudGlhbHM6IGZhbHNlLFxuXHRcdFx0XHRoZWFkZXJzOiB7XG5cdFx0XHRcdFx0J0NvbnRlbnQtVHlwZSc6ICdhcHBsaWNhdGlvbi94LXd3dy1mb3JtLXVybGVuY29kZWQnLFxuXHRcdFx0XHRcdC4uLnRoaXMub3B0aW9ucy5oZWFkZXJzLFxuXHRcdFx0XHR9LFxuXHRcdFx0XHRkYXRhOiBib2R5LFxuXHRcdFx0fSlcblx0XHRcdFx0LnRoZW4oKHJzcCkgPT4gcnNwLmRhdGEpXG5cdFx0XHRcdC50aGVuKChyYXdSZXNwKSA9PiB7XG5cdFx0XHRcdFx0bGV0IHJlc3AgPSByYXdSZXNwO1xuXHRcdFx0XHRcdGlmICh0ZXh0Lmxlbmd0aCA9PSAxKSB7XG5cdFx0XHRcdFx0XHQvLyAoc3RyaW5nIHwgc3RyaW5nW10pW11cblx0XHRcdFx0XHRcdHJlc3AgPSBbcmF3UmVzcF07XG5cdFx0XHRcdFx0fVxuXG5cdFx0XHRcdFx0aWYgKCFBcnJheS5pc0FycmF5KHJlc3ApKSB7XG5cdFx0XHRcdFx0XHR0aHJvdyBuZXcgRXJyb3IoJ1VuZXhwZWN0ZWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRjb25zdCByZXN1bHQ6IChzdHJpbmcgfCBudWxsKVtdID0gW107XG5cblx0XHRcdFx0XHQvLyBIYW5kbGUgY2h1bmtzXG5cdFx0XHRcdFx0cmVzcC5mb3JFYWNoKChjaHVuaykgPT4ge1xuXHRcdFx0XHRcdFx0bGV0IHRyYW5zbGF0ZWRUZXh0ID0gJyc7XG5cblx0XHRcdFx0XHRcdGlmIChmcm9tID09PSAnYXV0bycpIHtcblx0XHRcdFx0XHRcdFx0Ly8gU3RydWN0dXJlOiBbdHJhbnNsYXRlOiBzdHJpbmcsIGRldGVjdGVkTGFuZ3VhZ2U6IHN0cmluZ11cblx0XHRcdFx0XHRcdFx0aWYgKCFBcnJheS5pc0FycmF5KGNodW5rKSB8fCB0eXBlb2YgY2h1bmtbMF0gIT09ICdzdHJpbmcnKSB7XG5cdFx0XHRcdFx0XHRcdFx0dGhyb3cgbmV3IEVycm9yKCdVbmV4cGVjdGVkIHJlc3BvbnNlJyk7XG5cdFx0XHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdFx0XHR0cmFuc2xhdGVkVGV4dCA9IGNodW5rWzBdO1xuXHRcdFx0XHRcdFx0fSBlbHNlIHtcblx0XHRcdFx0XHRcdFx0Ly8gU3RydWN0dXJlOiB0cmFuc2xhdGU6IHN0cmluZ1xuXHRcdFx0XHRcdFx0XHRpZiAodHlwZW9mIGNodW5rICE9PSAnc3RyaW5nJykge1xuXHRcdFx0XHRcdFx0XHRcdHRocm93IG5ldyBFcnJvcignVW5leHBlY3RlZCByZXNwb25zZScpO1xuXHRcdFx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRcdFx0dHJhbnNsYXRlZFRleHQgPSBjaHVuaztcblx0XHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdFx0Ly8gVHJ5IHRvIHBhcnNlIFhNTFxuXHRcdFx0XHRcdFx0bGV0IHRyYW5zbGF0aW9uUmVzdWx0OiBudWxsIHwgc3RyaW5nID0gbnVsbDtcblx0XHRcdFx0XHRcdHRyeSB7XG5cdFx0XHRcdFx0XHRcdHRyYW5zbGF0aW9uUmVzdWx0ID0gdGhpcy5wYXJzZVhNTFJlc3BvbnNlKHRyYW5zbGF0ZWRUZXh0KTtcblx0XHRcdFx0XHRcdH0gY2F0Y2ggKGVycm9yKSB7fVxuXG5cdFx0XHRcdFx0XHQvLyBQdXNoIGl0ZW1cblx0XHRcdFx0XHRcdGlmIChcblx0XHRcdFx0XHRcdFx0dHJhbnNsYXRpb25SZXN1bHQgPT09IG51bGwgfHxcblx0XHRcdFx0XHRcdFx0dHJhbnNsYXRpb25SZXN1bHQubGVuZ3RoID09PSAwXG5cdFx0XHRcdFx0XHQpIHtcblx0XHRcdFx0XHRcdFx0Ly8gV2UgZG9uJ3QgaGF2ZSB0cmFuc2xhdGlvbiwgc28gaW5zZXJ0IG51bGwgaW5zdGVhZCBvZiByZXN1bHRcblx0XHRcdFx0XHRcdFx0cmVzdWx0LnB1c2gobnVsbCk7XG5cdFx0XHRcdFx0XHR9IGVsc2Uge1xuXHRcdFx0XHRcdFx0XHRyZXN1bHQucHVzaCh0cmFuc2xhdGlvblJlc3VsdCk7XG5cdFx0XHRcdFx0XHR9XG5cdFx0XHRcdFx0fSk7XG5cblx0XHRcdFx0XHRpZiAocmVzdWx0Lmxlbmd0aCAhPT0gdGV4dC5sZW5ndGgpIHtcblx0XHRcdFx0XHRcdHRocm93IG5ldyBFcnJvcihcblx0XHRcdFx0XHRcdFx0J01pc21hdGNoaW5nIGEgbGVuZ3RocyBvZiBvcmlnaW5hbCBhbmQgdHJhbnNsYXRlZCBhcnJheXMnLFxuXHRcdFx0XHRcdFx0KTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRyZXR1cm4gcmVzdWx0O1xuXHRcdFx0XHR9KTtcblx0XHR9KTtcblx0fVxuXG5cdHByaXZhdGUgZW5jb2RlRm9yQmF0Y2godGV4dExpc3Q6IHN0cmluZ1tdKSB7XG5cdFx0cmV0dXJuIHRleHRMaXN0Lm1hcCgodGV4dCwgaSkgPT4gYDxwcmU+PGEgaT1cIiR7aX1cIj4ke3RleHR9PC9hPjwvcHJlPmApO1xuXHR9XG59XG5cbi8qKlxuICogVHJhbnNsYXRvciBpbXBsZW1lbnRhdGlvbiB3aGljaCB1c2UgR29vZ2xlIEFQSSB3aXRob3V0IHRva2VuXG4gKi9cbmV4cG9ydCBjbGFzcyBHb29nbGVUcmFuc2xhdG9yVG9rZW5GcmVlIGV4dGVuZHMgQWJzdHJhY3RHb29nbGVUcmFuc2xhdG9yIHtcblx0cHVibGljIHN0YXRpYyByZWFkb25seSB0cmFuc2xhdG9yTmFtZSA9ICdHb29nbGVUcmFuc2xhdG9yVG9rZW5GcmVlJztcblxuXHRwdWJsaWMgdHJhbnNsYXRlID0gYXN5bmMgKHRleHQ6IHN0cmluZywgZnJvbTogbGFuZ0NvZGVXaXRoQXV0bywgdG86IGxhbmdDb2RlKSA9PiB7XG5cdFx0Y29uc3QgW3RyYW5zbGF0aW9uXSA9IGF3YWl0IHRoaXMudHJhbnNsYXRlQmF0Y2goW3RleHRdLCBmcm9tLCB0byk7XG5cdFx0cmV0dXJuIHRyYW5zbGF0aW9uO1xuXHR9O1xuXG5cdHB1YmxpYyB0cmFuc2xhdGVCYXRjaCh0ZXh0OiBzdHJpbmdbXSwgZnJvbTogbGFuZ0NvZGVXaXRoQXV0bywgdG86IGxhbmdDb2RlKSB7XG5cdFx0Y29uc3QgYXBpUGF0aCA9ICdodHRwczovL3RyYW5zbGF0ZS5nb29nbGVhcGlzLmNvbS90cmFuc2xhdGVfYS90JztcblxuXHRcdGNvbnN0IGRhdGEgPSB7XG5cdFx0XHRjbGllbnQ6ICdkaWN0LWNocm9tZS1leCcsXG5cdFx0XHRzbDogdGhpcy5maXhMYW5nKGZyb20pLFxuXHRcdFx0dGw6IHRoaXMuZml4TGFuZyh0byksXG5cdFx0XHRxOiB0ZXh0LFxuXHRcdH07XG5cblx0XHRjb25zdCB1cmwgPSBhcGlQYXRoICsgJz8nICsgc3RyaW5naWZ5KGRhdGEpO1xuXG5cdFx0cmV0dXJuIGF4aW9zKHtcblx0XHRcdHVybDogdGhpcy53cmFwVXJsVG9Db3JzUHJveHkodXJsKSxcblx0XHRcdG1ldGhvZDogJ0dFVCcsXG5cdFx0XHR3aXRoQ3JlZGVudGlhbHM6IGZhbHNlLFxuXHRcdFx0aGVhZGVyczoge1xuXHRcdFx0XHQnQ29udGVudC1UeXBlJzogJ2FwcGxpY2F0aW9uL3gtd3d3LWZvcm0tdXJsZW5jb2RlZCcsXG5cdFx0XHRcdC4uLnRoaXMub3B0aW9ucy5oZWFkZXJzLFxuXHRcdFx0fSxcblx0XHR9KVxuXHRcdFx0LnRoZW4oKHJzcCkgPT4gcnNwLmRhdGEpXG5cdFx0XHQudGhlbigocmF3UmVzcCkgPT4ge1xuXHRcdFx0XHRpZiAodGV4dC5sZW5ndGggPiAwICYmIEFycmF5LmlzQXJyYXkocmF3UmVzcCkpIHtcblx0XHRcdFx0XHQvLyBIYW5kbGUgbWFueSB0ZXh0c1xuXHRcdFx0XHRcdGNvbnN0IGlubmVyQXJyYXkgPSByYXdSZXNwWzBdO1xuXHRcdFx0XHRcdGlmICghQXJyYXkuaXNBcnJheShpbm5lckFycmF5KSB8fCBpbm5lckFycmF5Lmxlbmd0aCAhPT0gdGV4dC5sZW5ndGgpIHtcblx0XHRcdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRyZXR1cm4gaW5uZXJBcnJheS5tYXAoKGl0ZW0pID0+IHtcblx0XHRcdFx0XHRcdGNvbnN0IG9iaiA9IGRlZXBFeHBsb3JlQXJyYXkoaXRlbSwgMyk7XG5cdFx0XHRcdFx0XHRpZiAodHlwZW9mIG9iaiAhPT0gJ3N0cmluZycpIHtcblx0XHRcdFx0XHRcdFx0dGhyb3cgbmV3IFR5cGVFcnJvcignSW52YWxpZCBpdGVtIHR5cGUnKTtcblx0XHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdFx0cmV0dXJuIG9iajtcblx0XHRcdFx0XHR9KTtcblx0XHRcdFx0fSBlbHNlIGlmIChcblx0XHRcdFx0XHR0ZXh0Lmxlbmd0aCA9PT0gMSAmJlxuXHRcdFx0XHRcdHR5cGVvZiByYXdSZXNwID09PSAnb2JqZWN0JyAmJlxuXHRcdFx0XHRcdHJhd1Jlc3AgIT09IG51bGwgJiZcblx0XHRcdFx0XHQnc2VudGVuY2VzJyBpbiByYXdSZXNwXG5cdFx0XHRcdCkge1xuXHRcdFx0XHRcdC8vIEhhbmRsZSBvbmUgdGV4dFxuXHRcdFx0XHRcdGNvbnN0IHNlbnRlbmNlcyA9IChyYXdSZXNwIGFzIGFueSkuc2VudGVuY2VzIGFzIHVua25vd247XG5cdFx0XHRcdFx0aWYgKCFBcnJheS5pc0FycmF5KHNlbnRlbmNlcykpIHtcblx0XHRcdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRjb25zdCB0cmFuc2xhdGVkVGV4dCA9IHNlbnRlbmNlc1xuXHRcdFx0XHRcdFx0LnNsaWNlKDAsIC0xKVxuXHRcdFx0XHRcdFx0Lm1hcCgoc2VudGVuY2UpID0+IHtcblx0XHRcdFx0XHRcdFx0aWYgKHR5cGVvZiBzZW50ZW5jZSAhPT0gJ29iamVjdCcgfHwgISgndHJhbnMnIGluIHNlbnRlbmNlKSkge1xuXHRcdFx0XHRcdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHRcdFx0fVxuXG5cdFx0XHRcdFx0XHRcdHJldHVybiBzZW50ZW5jZS50cmFucztcblx0XHRcdFx0XHRcdH0pXG5cdFx0XHRcdFx0XHQuam9pbignJyk7XG5cblx0XHRcdFx0XHRyZXR1cm4gW3RyYW5zbGF0ZWRUZXh0XTtcblx0XHRcdFx0fVxuXG5cdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgcmVzcG9uc2UnKTtcblx0XHRcdH0pO1xuXHR9XG59XG4iXSwiZmlsZSI6InRyYW5zbGF0b3JzL0dvb2dsZVRyYW5zbGF0b3IvaW5kZXguanMifQ==
+//# sourceMappingURL=data:application/json;charset=utf8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbInRyYW5zbGF0b3JzL0dvb2dsZVRyYW5zbGF0b3IvaW5kZXgudHMiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6Ijs7Ozs7OztBQUFBOztBQUNBOztBQUNBOztBQUNBOztBQUVBOztBQUNBOztBQUNBOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7OztBQUVBOztBQUVHO0FBQ0gsSUFBQSx3QkFBQTtBQUFBO0FBQUEsVUFBQSxNQUFBLEVBQUE7QUFBdUQsRUFBQSxTQUFBLENBQUEsd0JBQUEsRUFBQSxNQUFBLENBQUE7O0FBQXZELFdBQUEsd0JBQUEsR0FBQTtBQUFBLFFBQUEsS0FBQSxHQUFBLE1BQUEsS0FBQSxJQUFBLElBQUEsTUFBQSxDQUFBLEtBQUEsQ0FBQSxJQUFBLEVBQUEsU0FBQSxDQUFBLElBQUEsSUFBQTs7QUFpQ29CLElBQUEsS0FBQSxDQUFBLGdCQUFBLEdBQTJDO0FBQzdELE1BQUEsRUFBRSxFQUFFO0FBRHlELEtBQTNDOztBQU9uQjs7QUF2Q2MsRUFBQSx3QkFBQSxDQUFBLG1CQUFBLEdBQWQsWUFBQTtBQUNDLFdBQU8sSUFBUDtBQUNBLEdBRmE7O0FBSUEsRUFBQSx3QkFBQSxDQUFBLHFCQUFBLEdBQWQsWUFBQTtBQUNDO0FBRUE7QUFDQTtBQUNBLFdBQU8sQ0FDTixJQURNLEVBQ0EsSUFEQSxFQUNNLElBRE4sRUFDWSxJQURaLEVBQ2tCLElBRGxCLEVBQ3dCLElBRHhCLEVBQzhCLElBRDlCLEVBQ29DLElBRHBDLEVBQzBDLElBRDFDLEVBQ2dELElBRGhELEVBRU4sSUFGTSxFQUVBLElBRkEsRUFFTSxJQUZOLEVBRVks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U0FBUyxHQUFJLE9BQWUsQ0FBQyxTQUFuQzs7QUFDQSxZQUFJLENBQUMsS0FBSyxDQUFDLE9BQU4sQ0FBYyxTQUFkLENBQUwsRUFBK0I7QUFDOUIsZ0JBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBOztBQUVELFlBQU0sY0FBYyxHQUFHLFNBQVMsQ0FDOUIsS0FEcUIsQ0FDZixDQURlLEVBQ1osQ0FBQyxDQURXLEVBRXJCLEdBRnFCLENBRWpCLFVBQUMsUUFBRCxFQUFTO0FBQ2IsY0FBSSxPQUFPLFFBQVAsS0FBb0IsUUFBcEIsSUFBZ0MsRUFBRSxXQUFXLFFBQWIsQ0FBcEMsRUFBNEQ7QUFDM0QsWUFBQSxPQUFPLENBQUMsSUFBUixDQUFhLHFCQUFiLEVBQW9DLE9BQXBDO0FBQ0Esa0JBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBOztBQUVELGlCQUFPLFFBQVEsQ0FBQyxLQUFoQjtBQUNBLFNBVHFCLEVBVXJCLElBVnFCLENBVWhCLEVBVmdCLENBQXZCO0FBWUEsZUFBTyxDQUFDLGNBQUQsQ0FBUDtBQUNBOztBQUVELE1BQUEsT0FBTyxDQUFDLElBQVIsQ0FBYSxxQkFBYixFQUFvQyxPQUFwQztBQUNBLFlBQU0sSUFBSSxTQUFKLENBQWMsa0JBQWQsQ0FBTjtBQUNBLEtBbEVLLENBQVA7QUFtRUEsR0EvRU07O0FBUGdCLEVBQUEseUJBQUEsQ0FBQSxjQUFBLEdBQWlCLDJCQUFqQjtBQXVGeEIsU0FBQSx5QkFBQTtBQUFDLENBeEZELENBQStDLHdCQUEvQyxDQUFBIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IGF4aW9zIGZyb20gJ2F4aW9zJztcbmltcG9ydCB7IHN0cmluZ2lmeSB9IGZyb20gJ3F1ZXJ5LXN0cmluZyc7XG5pbXBvcnQgeHBhdGggZnJvbSAneHBhdGgnO1xuaW1wb3J0IHsgRE9NUGFyc2VyIH0gZnJvbSAnQHhtbGRvbS94bWxkb20nO1xuXG5pbXBvcnQgeyBsYW5nQ29kZSwgbGFuZ0NvZGVXaXRoQXV0bywgQmFzZVRyYW5zbGF0b3IgfSBmcm9tICcuLi8uLi90eXBlcy9UcmFuc2xhdG9yJztcbmltcG9ydCB7IGdldFRva2VuIH0gZnJvbSAnLi90b2tlbic7XG5pbXBvcnQgeyBkZWVwRXhwbG9yZUFycmF5IH0gZnJvbSAnLi91dGlscyc7XG5cbi8qKlxuICogQ29tbW9uIGNsYXNzIGZvciBnb29nbGUgdHJhbnNsYXRvciBpbXBsZW1lbnRhdGlvbnNcbiAqL1xuZXhwb3J0IGFic3RyYWN0IGNsYXNzIEFic3RyYWN0R29vZ2xlVHJhbnNsYXRvciBleHRlbmRzIEJhc2VUcmFuc2xhdG9yIHtcblx0cHVibGljIHN0YXRpYyBpc1N1cHBvcnRlZEF1dG9Gcm9tKCkge1xuXHRcdHJldHVybiB0cnVlO1xuXHR9XG5cblx0cHVibGljIHN0YXRpYyBnZXRTdXBwb3J0ZWRMYW5ndWFnZXMoKTogbGFuZ0NvZGVbXSB7XG5cdFx0Ly8gU3VwcG9ydGVkLCBidXQgbm90IHZhbGlkIGxhbmd1YWdlcyBbXCJ6aC1jblwiLCBcInpoLXR3XCIsICdjZWInLCAnaGF3JywgJ2l3JywgJ2htbicsICdqdycsICdtYSddXG5cblx0XHQvLyBlc2xpbnQtZGlzYWJsZVxuXHRcdC8vIHByZXR0aWVyLWlnbm9yZVxuXHRcdHJldHVybiBbXG5cdFx0XHQnYWYnLCAnc3EnLCAnYW0nLCAnYXInLCAnaHknLCAnYXonLCAnZXUnLCAnYmUnLCAnYm4nLCAnYnMnLFxuXHRcdFx0J2JnJywgJ2NhJywgJ255JywgJ2NvJywgJ2hyJywgJ2NzJywgJ2RhJywgJ25sJywgJ2VuJywgJ2VvJyxcblx0XHRcdCdldCcsICd0bCcsICdmaScsICdmcicsICdmeScsICdnbCcsICdrYScsICdkZScsICdlbCcsICdndScsXG5cdFx0XHQnaHQnLCAnaGEnLCAnaGknLCAnaHUnLCAnaXMnLCAnaWcnLCAnaWQnLCAnZ2EnLCAnaXQnLCAnamEnLFxuXHRcdFx0J2tuJywgJ2trJywgJ2ttJywgJ2tvJywgJ2t1JywgJ2t5JywgJ2xvJywgJ2xhJywgJ2x2JywgJ2x0Jyxcblx0XHRcdCdsYicsICdtaycsICdtZycsICdtcycsICdtbCcsICdtdCcsICdtaScsICdtcicsICdtbicsICdteScsXG5cdFx0XHQnbmUnLCAnbm8nLCAncHMnLCAnZmEnLCAncGwnLCAncHQnLCAncGEnLCAncm8nLCAncnUnLCAnc20nLFxuXHRcdFx0J2dkJywgJ3NyJywgJ3N0JywgJ3NuJywgJ3NkJywgJ3NpJywgJ3NrJywgJ3NsJywgJ3NvJywgJ2VzJyxcblx0XHRcdCdzdScsICdzdycsICdzdicsICd0ZycsICd0YScsICd0ZScsICd0aCcsICd0cicsICd1aycsICd1cicsXG5cdFx0XHQndXonLCAndmknLCAnY3knLCAneGgnLCAneWknLCAneW8nLCAnenUnLCAnemgnLFxuXHRcdF07XG5cdFx0Ly8gZXNsaW50LWVuYWJsZVxuXHR9XG5cblx0cHVibGljIGdldExlbmd0aExpbWl0KCkge1xuXHRcdHJldHVybiA0MDAwO1xuXHR9XG5cblx0cHVibGljIGdldFJlcXVlc3RzVGltZW91dCgpIHtcblx0XHRyZXR1cm4gMzAwO1xuXHR9XG5cblx0cHJvdGVjdGVkIHJlYWRvbmx5IGxhbmdSZXBsYWNlbWVudHM6IFJlY29yZDxzdHJpbmcsIHN0cmluZz4gPSB7XG5cdFx0emg6ICd6aC1jbicsXG5cdH07XG5cblx0cHJvdGVjdGVkIGZpeExhbmcobGFuZzogbGFuZ0NvZGVXaXRoQXV0bykge1xuXHRcdHJldHVybiBsYW5nIGluIHRoaXMubGFuZ1JlcGxhY2VtZW50cyA/IHRoaXMubGFuZ1JlcGxhY2VtZW50c1tsYW5nXSA6IGxhbmc7XG5cdH1cbn1cblxuLyoqXG4gKiBUcmFuc2xhdG9yIGltcGxlbWVudGF0aW9uIHdoaWNoIHVzZSBHb29nbGUgQVBJIHdpdGggdG9rZW4gZnJvbSBodHRwczovL3RyYW5zbGF0ZS5nb29nbGUuY29tXG4gKi9cbmV4cG9ydCBjbGFzcyBHb29nbGVUcmFuc2xhdG9yIGV4dGVuZHMgQWJzdHJhY3RHb29nbGVUcmFuc2xhdG9yIHtcblx0cHVibGljIHN0YXRpYyByZWFkb25seSB0cmFuc2xhdG9yTmFtZSA9ICdHb29nbGVUcmFuc2xhdG9yJztcblxuXHRwdWJsaWMgY2hlY2tMaW1pdEV4Y2VlZGluZyh0ZXh0OiBzdHJpbmcgfCBzdHJpbmdbXSkge1xuXHRcdGlmIChBcnJheS5pc0FycmF5KHRleHQpKSB7XG5cdFx0XHRjb25zdCBlbmNvZGVkVGV4dCA9IHRoaXMuZW5jb2RlRm9yQmF0Y2godGV4dCkuam9pbignJyk7XG5cdFx0XHRjb25zdCBleHRyYSA9IGVuY29kZWRUZXh0Lmxlbmd0aCAtIHRoaXMuZ2V0TGVuZ3RoTGltaXQoKTtcblx0XHRcdHJldHVybiBleHRyYSA+IDAgPyBleHRyYSA6IDA7XG5cdFx0fSBlbHNlIHtcblx0XHRcdGNvbnN0IGV4dHJhID0gdGV4dC5sZW5ndGggLSB0aGlzLmdldExlbmd0aExpbWl0KCk7XG5cdFx0XHRyZXR1cm4gZXh0cmEgPiAwID8gZXh0cmEgOiAwO1xuXHRcdH1cblx0fVxuXG5cdHB1YmxpYyB0cmFuc2xhdGUodGV4dDogc3RyaW5nLCBmcm9tOiBsYW5nQ29kZVdpdGhBdXRvLCB0bzogbGFuZ0NvZGUpIHtcblx0XHRyZXR1cm4gZ2V0VG9rZW4odGV4dCkudGhlbigoeyB2YWx1ZTogdGsgfSkgPT4ge1xuXHRcdFx0Y29uc3QgYXBpUGF0aCA9ICdodHRwczovL3RyYW5zbGF0ZS5nb29nbGUuY29tL3RyYW5zbGF0ZV9hL3NpbmdsZSc7XG5cblx0XHRcdGNvbnN0IGRhdGEgPSB7XG5cdFx0XHRcdGNsaWVudDogJ3QnLFxuXHRcdFx0XHRzbDogdGhpcy5maXhMYW5nKGZyb20pLFxuXHRcdFx0XHR0bDogdGhpcy5maXhMYW5nKHRvKSxcblx0XHRcdFx0aGw6IHRoaXMuZml4TGFuZyh0byksXG5cdFx0XHRcdGR0OiBbJ2F0JywgJ2JkJywgJ2V4JywgJ2xkJywgJ21kJywgJ3FjYScsICdydycsICdybScsICdzcycsICd0J10sXG5cdFx0XHRcdGllOiAnVVRGLTgnLFxuXHRcdFx0XHRvZTogJ1VURi04Jyxcblx0XHRcdFx0b3RmOiAxLFxuXHRcdFx0XHRzc2VsOiAwLFxuXHRcdFx0XHR0c2VsOiAwLFxuXHRcdFx0XHRrYzogNyxcblx0XHRcdFx0cTogdGV4dCxcblx0XHRcdFx0dGssXG5cdFx0XHR9O1xuXG5cdFx0XHRjb25zdCB1cmwgPSBhcGlQYXRoICsgJz8nICsgc3RyaW5naWZ5KGRhdGEpO1xuXG5cdFx0XHRyZXR1cm4gYXhpb3Ncblx0XHRcdFx0LmdldCh0aGlzLndyYXBVcmxUb0NvcnNQcm94eSh1cmwpLCB7XG5cdFx0XHRcdFx0d2l0aENyZWRlbnRpYWxzOiBmYWxzZSxcblx0XHRcdFx0XHRoZWFkZXJzOiB0aGlzLm9wdGlvbnMuaGVhZGVycyxcblx0XHRcdFx0fSlcblx0XHRcdFx0LnRoZW4oKHJzcCkgPT4gcnNwLmRhdGEpXG5cdFx0XHRcdC50aGVuKChyc3ApID0+IHtcblx0XHRcdFx0XHRpZiAoIShyc3AgaW5zdGFuY2VvZiBBcnJheSkgfHwgIShyc3BbMF0gaW5zdGFuY2VvZiBBcnJheSkpIHtcblx0XHRcdFx0XHRcdHRocm93IG5ldyBFcnJvcignVW5leHBlY3RlZCByZXNwb25zZScpO1xuXHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdGNvbnN0IHRyYW5zbGF0ZWRUZXh0ID0gcnNwWzBdXG5cdFx0XHRcdFx0XHQubWFwKChjaHVuaykgPT5cblx0XHRcdFx0XHRcdFx0Y2h1bmsgaW5zdGFuY2VvZiBBcnJheSAmJiB0eXBlb2YgY2h1bmtbMF0gPT09ICdzdHJpbmcnXG5cdFx0XHRcdFx0XHRcdFx0PyBjaHVua1swXVxuXHRcdFx0XHRcdFx0XHRcdDogJycsXG5cdFx0XHRcdFx0XHQpXG5cdFx0XHRcdFx0XHQuam9pbignJyk7XG5cblx0XHRcdFx0XHRyZXR1cm4gdHJhbnNsYXRlZFRleHQ7XG5cdFx0XHRcdH0pO1xuXHRcdH0pO1xuXHR9XG5cblx0cHJpdmF0ZSBwYXJzZVhNTFJlc3BvbnNlID0gKHRleHQ6IHN0cmluZykgPT4ge1xuXHRcdGNvbnN0IGRvYyA9IG5ldyBET01QYXJzZXIoKS5wYXJzZUZyb21TdHJpbmcodGV4dCk7XG5cdFx0Y29uc3Qgbm9kZXMgPSB4cGF0aC5zZWxlY3QoJy8vcHJlLypbbm90KHNlbGY6OmkpXS8vdGV4dCgpJywgZG9jKTtcblx0XHRyZXR1cm4gbm9kZXMubWFwKChub2RlKSA9PiBub2RlLnRvU3RyaW5nKCkpLmpvaW4oJyAnKTtcblx0fTtcblxuXHRwdWJsaWMgdHJhbnNsYXRlQmF0Y2godGV4dDogc3RyaW5nW10sIGZyb206IGxhbmdDb2RlV2l0aEF1dG8sIHRvOiBsYW5nQ29kZSkge1xuXHRcdGNvbnN0IHByZXBhcmVkVGV4dCA9IHRoaXMuZW5jb2RlRm9yQmF0Y2godGV4dCk7XG5cdFx0cmV0dXJuIGdldFRva2VuKHByZXBhcmVkVGV4dC5qb2luKCcnKSkudGhlbigoeyB2YWx1ZTogdGsgfSkgPT4ge1xuXHRcdFx0Y29uc3QgYXBpUGF0aCA9ICdodHRwczovL3RyYW5zbGF0ZS5nb29nbGVhcGlzLmNvbS90cmFuc2xhdGVfYS90JztcblxuXHRcdFx0Y29uc3QgZGF0YSA9IHtcblx0XHRcdFx0YW5ubzogMyxcblx0XHRcdFx0Y2xpZW50OiAndGUnLFxuXHRcdFx0XHR2OiAnMS4wJyxcblx0XHRcdFx0Zm9ybWF0OiAnaHRtbCcsXG5cdFx0XHRcdHNsOiB0aGlzLmZpeExhbmcoZnJvbSksXG5cdFx0XHRcdHRsOiB0aGlzLmZpeExhbmcodG8pLFxuXHRcdFx0XHR0ayxcblx0XHRcdH07XG5cblx0XHRcdGNvbnN0IHVybCA9IGFwaVBhdGggKyAnPycgKyBzdHJpbmdpZnkoZGF0YSk7XG5cdFx0XHRjb25zdCBib2R5ID0gcHJlcGFyZWRUZXh0XG5cdFx0XHRcdC5tYXAoKHRleHQpID0+IGAmcT0ke2VuY29kZVVSSUNvbXBvbmVudCh0ZXh0KX1gKVxuXHRcdFx0XHQuam9pbignJyk7XG5cblx0XHRcdHJldHVybiBheGlvcyh7XG5cdFx0XHRcdHVybDogdGhpcy53cmFwVXJsVG9Db3JzUHJveHkodXJsKSxcblx0XHRcdFx0bWV0aG9kOiAnUE9TVCcsXG5cdFx0XHRcdHdpdGhDcmVkZW50aWFsczogZmFsc2UsXG5cdFx0XHRcdGhlYWRlcnM6IHtcblx0XHRcdFx0XHQnQ29udGVudC1UeXBlJzogJ2FwcGxpY2F0aW9uL3gtd3d3LWZvcm0tdXJsZW5jb2RlZCcsXG5cdFx0XHRcdFx0Li4udGhpcy5vcHRpb25zLmhlYWRlcnMsXG5cdFx0XHRcdH0sXG5cdFx0XHRcdGRhdGE6IGJvZHksXG5cdFx0XHR9KVxuXHRcdFx0XHQudGhlbigocnNwKSA9PiByc3AuZGF0YSlcblx0XHRcdFx0LnRoZW4oKHJhd1Jlc3ApID0+IHtcblx0XHRcdFx0XHRsZXQgcmVzcCA9IHJhd1Jlc3A7XG5cdFx0XHRcdFx0aWYgKHRleHQubGVuZ3RoID09IDEpIHtcblx0XHRcdFx0XHRcdC8vIChzdHJpbmcgfCBzdHJpbmdbXSlbXVxuXHRcdFx0XHRcdFx0cmVzcCA9IFtyYXdSZXNwXTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRpZiAoIUFycmF5LmlzQXJyYXkocmVzcCkpIHtcblx0XHRcdFx0XHRcdGNvbnNvbGUud2FybignVHJhbnNsYXRvciByZXNwb25zZScsIHJhd1Jlc3ApO1xuXHRcdFx0XHRcdFx0dGhyb3cgbmV3IEVycm9yKCdVbmV4cGVjdGVkIHJlc3BvbnNlJyk7XG5cdFx0XHRcdFx0fVxuXG5cdFx0XHRcdFx0Y29uc3QgcmVzdWx0OiAoc3RyaW5nIHwgbnVsbClbXSA9IFtdO1xuXG5cdFx0XHRcdFx0Ly8gSGFuZGxlIGNodW5rc1xuXHRcdFx0XHRcdHJlc3AuZm9yRWFjaCgoY2h1bmspID0+IHtcblx0XHRcdFx0XHRcdGxldCB0cmFuc2xhdGVkVGV4dCA9ICcnO1xuXG5cdFx0XHRcdFx0XHRpZiAoZnJvbSA9PT0gJ2F1dG8nKSB7XG5cdFx0XHRcdFx0XHRcdC8vIFN0cnVjdHVyZTogW3RyYW5zbGF0ZTogc3RyaW5nLCBkZXRlY3RlZExhbmd1YWdlOiBzdHJpbmddXG5cdFx0XHRcdFx0XHRcdGlmIChcblx0XHRcdFx0XHRcdFx0XHR0ZXh0Lmxlbmd0aCA9PT0gMSAmJlxuXHRcdFx0XHRcdFx0XHRcdEFycmF5LmlzQXJyYXkoY2h1bmspICYmXG5cdFx0XHRcdFx0XHRcdFx0dHlwZW9mIGNodW5rWzBdID09PSAnc3RyaW5nJ1xuXHRcdFx0XHRcdFx0XHQpIHtcblx0XHRcdFx0XHRcdFx0XHR0cmFuc2xhdGVkVGV4dCA9IGNodW5rWzBdO1xuXHRcdFx0XHRcdFx0XHR9IGVsc2UgaWYgKHRleHQubGVuZ3RoID4gMSAmJiB0eXBlb2YgY2h1bmsgPT09ICdzdHJpbmcnKSB7XG5cdFx0XHRcdFx0XHRcdFx0dHJhbnNsYXRlZFRleHQgPSBjaHVuaztcblx0XHRcdFx0XHRcdFx0fSBlbHNlIHtcblx0XHRcdFx0XHRcdFx0XHRjb25zb2xlLndhcm4oJ1RyYW5zbGF0b3IgcmVzcG9uc2UnLCByYXdSZXNwKTtcblx0XHRcdFx0XHRcdFx0XHR0aHJvdyBuZXcgRXJyb3IoJ1VuZXhwZWN0ZWQgcmVzcG9uc2UnKTtcblx0XHRcdFx0XHRcdFx0fVxuXHRcdFx0XHRcdFx0fSBlbHNlIHtcblx0XHRcdFx0XHRcdFx0Ly8gU3RydWN0dXJlOiB0cmFuc2xhdGU6IHN0cmluZ1xuXHRcdFx0XHRcdFx0XHRpZiAodHlwZW9mIGNodW5rID09PSAnc3RyaW5nJykge1xuXHRcdFx0XHRcdFx0XHRcdHRyYW5zbGF0ZWRUZXh0ID0gY2h1bms7XG5cdFx0XHRcdFx0XHRcdH0gZWxzZSBpZiAoXG5cdFx0XHRcdFx0XHRcdFx0QXJyYXkuaXNBcnJheShjaHVuaykgJiZcblx0XHRcdFx0XHRcdFx0XHR0eXBlb2YgY2h1bmtbMF0gPT09ICdzdHJpbmcnXG5cdFx0XHRcdFx0XHRcdCkge1xuXHRcdFx0XHRcdFx0XHRcdHRyYW5zbGF0ZWRUZXh0ID0gY2h1bmtbMF07XG5cdFx0XHRcdFx0XHRcdH0gZWxzZSB7XG5cdFx0XHRcdFx0XHRcdFx0Y29uc29sZS53YXJuKCdUcmFuc2xhdG9yIHJlc3BvbnNlJywgcmF3UmVzcCk7XG5cdFx0XHRcdFx0XHRcdFx0dGhyb3cgbmV3IEVycm9yKCdVbmV4cGVjdGVkIHJlc3BvbnNlJyk7XG5cdFx0XHRcdFx0XHRcdH1cblx0XHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdFx0Ly8gVHJ5IHRvIHBhcnNlIFhNTFxuXHRcdFx0XHRcdFx0bGV0IHRyYW5zbGF0aW9uUmVzdWx0OiBudWxsIHwgc3RyaW5nID0gbnVsbDtcblx0XHRcdFx0XHRcdHRyeSB7XG5cdFx0XHRcdFx0XHRcdHRyYW5zbGF0aW9uUmVzdWx0ID0gdGhpcy5wYXJzZVhNTFJlc3BvbnNlKHRyYW5zbGF0ZWRUZXh0KTtcblx0XHRcdFx0XHRcdH0gY2F0Y2ggKGVycm9yKSB7fVxuXG5cdFx0XHRcdFx0XHQvLyBQdXNoIGl0ZW1cblx0XHRcdFx0XHRcdGlmIChcblx0XHRcdFx0XHRcdFx0dHJhbnNsYXRpb25SZXN1bHQgPT09IG51bGwgfHxcblx0XHRcdFx0XHRcdFx0dHJhbnNsYXRpb25SZXN1bHQubGVuZ3RoID09PSAwXG5cdFx0XHRcdFx0XHQpIHtcblx0XHRcdFx0XHRcdFx0Ly8gV2UgZG9uJ3QgaGF2ZSB0cmFuc2xhdGlvbiwgc28gaW5zZXJ0IG51bGwgaW5zdGVhZCBvZiByZXN1bHRcblx0XHRcdFx0XHRcdFx0cmVzdWx0LnB1c2gobnVsbCk7XG5cdFx0XHRcdFx0XHR9IGVsc2Uge1xuXHRcdFx0XHRcdFx0XHRyZXN1bHQucHVzaCh0cmFuc2xhdGlvblJlc3VsdCk7XG5cdFx0XHRcdFx0XHR9XG5cdFx0XHRcdFx0fSk7XG5cblx0XHRcdFx0XHRpZiAocmVzdWx0Lmxlbmd0aCAhPT0gdGV4dC5sZW5ndGgpIHtcblx0XHRcdFx0XHRcdHRocm93IG5ldyBFcnJvcihcblx0XHRcdFx0XHRcdFx0J01pc21hdGNoaW5nIGEgbGVuZ3RocyBvZiBvcmlnaW5hbCBhbmQgdHJhbnNsYXRlZCBhcnJheXMnLFxuXHRcdFx0XHRcdFx0KTtcblx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRyZXR1cm4gcmVzdWx0O1xuXHRcdFx0XHR9KTtcblx0XHR9KTtcblx0fVxuXG5cdHByaXZhdGUgZW5jb2RlRm9yQmF0Y2godGV4dExpc3Q6IHN0cmluZ1tdKSB7XG5cdFx0cmV0dXJuIHRleHRMaXN0Lm1hcCgodGV4dCwgaSkgPT4gYDxwcmU+PGEgaT1cIiR7aX1cIj4ke3RleHR9PC9hPjwvcHJlPmApO1xuXHR9XG59XG5cbi8qKlxuICogVHJhbnNsYXRvciBpbXBsZW1lbnRhdGlvbiB3aGljaCB1c2UgR29vZ2xlIEFQSSB3aXRob3V0IHRva2VuXG4gKi9cbmV4cG9ydCBjbGFzcyBHb29nbGVUcmFuc2xhdG9yVG9rZW5GcmVlIGV4dGVuZHMgQWJzdHJhY3RHb29nbGVUcmFuc2xhdG9yIHtcblx0cHVibGljIHN0YXRpYyByZWFkb25seSB0cmFuc2xhdG9yTmFtZSA9ICdHb29nbGVUcmFuc2xhdG9yVG9rZW5GcmVlJztcblxuXHRwdWJsaWMgdHJhbnNsYXRlID0gYXN5bmMgKHRleHQ6IHN0cmluZywgZnJvbTogbGFuZ0NvZGVXaXRoQXV0bywgdG86IGxhbmdDb2RlKSA9PiB7XG5cdFx0Y29uc3QgW3RyYW5zbGF0aW9uXSA9IGF3YWl0IHRoaXMudHJhbnNsYXRlQmF0Y2goW3RleHRdLCBmcm9tLCB0byk7XG5cdFx0cmV0dXJuIHRyYW5zbGF0aW9uO1xuXHR9O1xuXG5cdHB1YmxpYyB0cmFuc2xhdGVCYXRjaCh0ZXh0OiBzdHJpbmdbXSwgZnJvbTogbGFuZ0NvZGVXaXRoQXV0bywgdG86IGxhbmdDb2RlKSB7XG5cdFx0Y29uc3QgYXBpUGF0aCA9ICdodHRwczovL3RyYW5zbGF0ZS5nb29nbGVhcGlzLmNvbS90cmFuc2xhdGVfYS90JztcblxuXHRcdGNvbnN0IGRhdGEgPSB7XG5cdFx0XHRjbGllbnQ6ICdkaWN0LWNocm9tZS1leCcsXG5cdFx0XHRzbDogdGhpcy5maXhMYW5nKGZyb20pLFxuXHRcdFx0dGw6IHRoaXMuZml4TGFuZyh0byksXG5cdFx0XHRxOiB0ZXh0LFxuXHRcdH07XG5cblx0XHRjb25zdCB1cmwgPSBhcGlQYXRoICsgJz8nICsgc3RyaW5naWZ5KGRhdGEpO1xuXG5cdFx0cmV0dXJuIGF4aW9zKHtcblx0XHRcdHVybDogdGhpcy53cmFwVXJsVG9Db3JzUHJveHkodXJsKSxcblx0XHRcdG1ldGhvZDogJ0dFVCcsXG5cdFx0XHR3aXRoQ3JlZGVudGlhbHM6IGZhbHNlLFxuXHRcdFx0aGVhZGVyczoge1xuXHRcdFx0XHQnQ29udGVudC1UeXBlJzogJ2FwcGxpY2F0aW9uL3gtd3d3LWZvcm0tdXJsZW5jb2RlZCcsXG5cdFx0XHRcdC4uLnRoaXMub3B0aW9ucy5oZWFkZXJzLFxuXHRcdFx0fSxcblx0XHR9KVxuXHRcdFx0LnRoZW4oKHJzcCkgPT4gcnNwLmRhdGEpXG5cdFx0XHQudGhlbigocmF3UmVzcCkgPT4ge1xuXHRcdFx0XHRpZiAodGV4dC5sZW5ndGggPiAwICYmIEFycmF5LmlzQXJyYXkocmF3UmVzcCkpIHtcblx0XHRcdFx0XHQvLyBIYW5kbGUgbWFueSB0ZXh0c1xuXHRcdFx0XHRcdGNvbnN0IGlubmVyQXJyYXkgPSByYXdSZXNwWzBdO1xuXHRcdFx0XHRcdGlmIChBcnJheS5pc0FycmF5KGlubmVyQXJyYXkpICYmIGlubmVyQXJyYXkubGVuZ3RoID09PSB0ZXh0Lmxlbmd0aCkge1xuXHRcdFx0XHRcdFx0cmV0dXJuIGlubmVyQXJyYXkubWFwKChpdGVtKSA9PiB7XG5cdFx0XHRcdFx0XHRcdGNvbnN0IG9iaiA9IGRlZXBFeHBsb3JlQXJyYXkoaXRlbSwgMyk7XG5cdFx0XHRcdFx0XHRcdGlmICh0eXBlb2Ygb2JqICE9PSAnc3RyaW5nJykge1xuXHRcdFx0XHRcdFx0XHRcdGNvbnNvbGUud2FybignVHJhbnNsYXRvciByZXNwb25zZScsIHJhd1Jlc3ApO1xuXHRcdFx0XHRcdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgaXRlbSB0eXBlJyk7XG5cdFx0XHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdFx0XHRyZXR1cm4gb2JqO1xuXHRcdFx0XHRcdFx0fSk7XG5cdFx0XHRcdFx0fSBlbHNlIGlmIChBcnJheS5pc0FycmF5KHJhd1Jlc3ApICYmIHJhd1Jlc3AubGVuZ3RoID09PSB0ZXh0Lmxlbmd0aCkge1xuXHRcdFx0XHRcdFx0cmF3UmVzcC5mb3JFYWNoKChpdGVtKSA9PiB7XG5cdFx0XHRcdFx0XHRcdGlmICh0eXBlb2YgaXRlbSAhPT0gJ3N0cmluZycpIHtcblx0XHRcdFx0XHRcdFx0XHRjb25zb2xlLndhcm4oJ1RyYW5zbGF0b3IgcmVzcG9uc2UnLCByYXdSZXNwKTtcblx0XHRcdFx0XHRcdFx0XHR0aHJvdyBuZXcgVHlwZUVycm9yKCdJbnZhbGlkIGl0ZW0gdHlwZScpO1xuXHRcdFx0XHRcdFx0XHR9XG5cdFx0XHRcdFx0XHR9KTtcblxuXHRcdFx0XHRcdFx0cmV0dXJuIHJhd1Jlc3A7XG5cdFx0XHRcdFx0fVxuXG5cdFx0XHRcdFx0Y29uc29sZS53YXJuKCdUcmFuc2xhdG9yIHJlc3BvbnNlJywgcmF3UmVzcCk7XG5cdFx0XHRcdFx0dGhyb3cgbmV3IFR5cGVFcnJvcignSW52YWxpZCByZXNwb25zZScpO1xuXHRcdFx0XHR9IGVsc2UgaWYgKFxuXHRcdFx0XHRcdHRleHQubGVuZ3RoID09PSAxICYmXG5cdFx0XHRcdFx0dHlwZW9mIHJhd1Jlc3AgPT09ICdvYmplY3QnICYmXG5cdFx0XHRcdFx0cmF3UmVzcCAhPT0gbnVsbCAmJlxuXHRcdFx0XHRcdCdzZW50ZW5jZXMnIGluIHJhd1Jlc3Bcblx0XHRcdFx0KSB7XG5cdFx0XHRcdFx0Ly8gSGFuZGxlIG9uZSB0ZXh0XG5cdFx0XHRcdFx0Y29uc3Qgc2VudGVuY2VzID0gKHJhd1Jlc3AgYXMgYW55KS5zZW50ZW5jZXMgYXMgdW5rbm93bjtcblx0XHRcdFx0XHRpZiAoIUFycmF5LmlzQXJyYXkoc2VudGVuY2VzKSkge1xuXHRcdFx0XHRcdFx0dGhyb3cgbmV3IFR5cGVFcnJvcignSW52YWxpZCByZXNwb25zZScpO1xuXHRcdFx0XHRcdH1cblxuXHRcdFx0XHRcdGNvbnN0IHRyYW5zbGF0ZWRUZXh0ID0gc2VudGVuY2VzXG5cdFx0XHRcdFx0XHQuc2xpY2UoMCwgLTEpXG5cdFx0XHRcdFx0XHQubWFwKChzZW50ZW5jZSkgPT4ge1xuXHRcdFx0XHRcdFx0XHRpZiAodHlwZW9mIHNlbnRlbmNlICE9PSAnb2JqZWN0JyB8fCAhKCd0cmFucycgaW4gc2VudGVuY2UpKSB7XG5cdFx0XHRcdFx0XHRcdFx0Y29uc29sZS53YXJuKCdUcmFuc2xhdG9yIHJlc3BvbnNlJywgcmF3UmVzcCk7XG5cdFx0XHRcdFx0XHRcdFx0dGhyb3cgbmV3IFR5cGVFcnJvcignSW52YWxpZCByZXNwb25zZScpO1xuXHRcdFx0XHRcdFx0XHR9XG5cblx0XHRcdFx0XHRcdFx0cmV0dXJuIHNlbnRlbmNlLnRyYW5zO1xuXHRcdFx0XHRcdFx0fSlcblx0XHRcdFx0XHRcdC5qb2luKCcnKTtcblxuXHRcdFx0XHRcdHJldHVybiBbdHJhbnNsYXRlZFRleHRdO1xuXHRcdFx0XHR9XG5cblx0XHRcdFx0Y29uc29sZS53YXJuKCdUcmFuc2xhdG9yIHJlc3BvbnNlJywgcmF3UmVzcCk7XG5cdFx0XHRcdHRocm93IG5ldyBUeXBlRXJyb3IoJ0ludmFsaWQgcmVzcG9uc2UnKTtcblx0XHRcdH0pO1xuXHR9XG59XG4iXSwiZmlsZSI6InRyYW5zbGF0b3JzL0dvb2dsZVRyYW5zbGF0b3IvaW5kZXguanMifQ==
 
 
 /***/ }),
@@ -10885,6 +10992,1546 @@ function getToken(query) {
   }));
 }
 //# sourceMappingURL=data:application/json;charset=utf8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbInRyYW5zbGF0b3JzL0dvb2dsZVRyYW5zbGF0b3IvdG9rZW4uanMiXSwibmFtZXMiOlsiZ29vZ2xlVHJhbnNsYXRlVEtLIiwic2hpZnRMZWZ0T3JSaWdodFRoZW5TdW1PclhvciIsIm51bSIsIm9wdFN0cmluZyIsImkiLCJsZW5ndGgiLCJhY2MiLCJjaGFyQXQiLCJjaGFyQ29kZUF0IiwiTnVtYmVyIiwidHJhbnNmb3JtUXVlcnkiLCJxdWVyeSIsImJ5dGVzQXJyYXkiLCJpZHgiLCJjaGFyQ29kZSIsImNhbGNIYXNoIiwid2luZG93VGtrIiwidGtrU3BsaXRlZCIsInNwbGl0IiwidGtrSW5kZXgiLCJ0a2tLZXkiLCJlbmNvbmRpbmdSb3VuZCIsIm5vcm1hbGl6ZWRSZXN1bHQiLCJ0b1N0cmluZyIsImdldFRva2VuIiwiUHJvbWlzZSIsInJlcyIsInZhbHVlIl0sIm1hcHBpbmdzIjoiOzs7Ozs7QUFBQTtBQUNBLE1BQU1BLGtCQUFrQixHQUFHLGtCQUEzQixDLENBRUE7QUFDQTtBQUNBOztBQUNBOztBQUVBLFNBQVNDLDRCQUFULENBQXNDQyxHQUF0QyxFQUEyQ0MsU0FBM0MsRUFBc0Q7QUFDckQsT0FBSyxJQUFJQyxDQUFDLEdBQUcsQ0FBYixFQUFnQkEsQ0FBQyxHQUFHRCxTQUFTLENBQUNFLE1BQVYsR0FBbUIsQ0FBdkMsRUFBMENELENBQUMsSUFBSSxDQUEvQyxFQUFrRDtBQUNqRCxRQUFJRSxHQUFHLEdBQUdILFNBQVMsQ0FBQ0ksTUFBVixDQUFpQkgsQ0FBQyxHQUFHLENBQXJCLENBQVY7O0FBQ0EsUUFBSSxPQUFPRSxHQUFYLEVBQWdCO0FBQ2ZBLE1BQUFBLEdBQUcsR0FBR0EsR0FBRyxDQUFDRSxVQUFKLENBQWUsQ0FBZixJQUFvQixFQUExQjtBQUNBLEtBRkQsTUFFTztBQUNORixNQUFBQSxHQUFHLEdBQUdHLE1BQU0sQ0FBQ0gsR0FBRCxDQUFaO0FBQ0E7O0FBQ0QsUUFBSUgsU0FBUyxDQUFDSSxNQUFWLENBQWlCSCxDQUFDLEdBQUcsQ0FBckIs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QSxDQUFDLEdBQUdRLFVBQVUsQ0FBQ1AsTUFBL0IsRUFBdUNELENBQUMsRUFBeEMsRUFBNEM7QUFDM0NpQixJQUFBQSxjQUFjLElBQUlULFVBQVUsQ0FBQ1IsQ0FBRCxDQUE1QjtBQUNBaUIsSUFBQUEsY0FBYyxHQUFHcEIsNEJBQTRCLENBQUNvQixjQUFELEVBQWlCLFFBQWpCLENBQTdDO0FBQ0E7O0FBQ0RBLEVBQUFBLGNBQWMsR0FBR3BCLDRCQUE0QixDQUFDb0IsY0FBRCxFQUFpQixXQUFqQixDQUE3QztBQUVBQSxFQUFBQSxjQUFjLElBQUlELE1BQWxCOztBQUNBLE1BQUlDLGNBQWMsSUFBSSxDQUF0QixFQUF5QjtBQUN4QkEsSUFBQUEsY0FBYyxHQUFHLENBQUNBLGNBQWMsR0FBRyxVQUFsQixJQUFnQyxVQUFqRDtBQUNBOztBQUVELFFBQU1DLGdCQUFnQixHQUFHRCxjQUFjLEdBQUcsT0FBMUM7QUFDQSxTQUFPQyxnQkFBZ0IsQ0FBQ0MsUUFBakIsS0FBOEIsR0FBOUIsSUFBcUNELGdCQUFnQixHQUFHSCxRQUF4RCxDQUFQO0FBQ0E7QUFFRDtBQUNBO0FBQ0E7QUFDQTs7O0FBRU8sU0FBU0ssUUFBVCxDQUFrQmIsS0FBbEIsRUFBeUI7QUFDL0IsU0FBTyxJQUFJYyxPQUFKLENBQWFDLEdBQUQsSUFBU0EsR0FBRyxDQUFDO0FBQUVDLElBQUFBLEtBQUssRUFBRVosUUFBUSxDQUFDSixLQUFELEVBQVFYLGtCQUFSO0FBQWpCLEdBQUQsQ0FBeEIsQ0FBUDtBQUNBIiwic291cmNlc0NvbnRlbnQiOlsiLy8gVEtLIHZhbHVlIGZyb20gaHR0cHM6Ly9naXRodWIuY29tL0ZpbGlwZVBTL1RyYWR1emlyLXBhZ2luYXMtd2ViL2Jsb2IvZjNhNDk1NmExYWE5NmI3YTkxMjQ4NjQxNThhNTIwMDgyNzY5NDUyMS9iYWNrZ3JvdW5kL3RyYW5zbGF0aW9uU2VydmljZS5qc1xuY29uc3QgZ29vZ2xlVHJhbnNsYXRlVEtLID0gJzQ0ODQ4Ny45MzI2MDk2NDYnO1xuXG4vL1xuLy8gT2JmdXNjYXRlZCBsb2dpYzogU1RBUlRcbi8vXG4vKiBlc2xpbnQtZGlzYWJsZSBuby1iaXR3aXNlICovXG5cbmZ1bmN0aW9uIHNoaWZ0TGVmdE9yUmlnaHRUaGVuU3VtT3JYb3IobnVtLCBvcHRTdHJpbmcpIHtcblx0Zm9yIChsZXQgaSA9IDA7IGkgPCBvcHRTdHJpbmcubGVuZ3RoIC0gMjsgaSArPSAzKSB7XG5cdFx0bGV0IGFjYyA9IG9wdFN0cmluZy5jaGFyQXQoaSArIDIpO1xuXHRcdGlmICgnYScgPD0gYWNjKSB7XG5cdFx0XHRhY2MgPSBhY2MuY2hhckNvZGVBdCgwKSAtIDg3O1xuXHRcdH0gZWxzZSB7XG5cdFx0XHRhY2MgPSBOdW1iZXIoYWNjKTtcblx0XHR9XG5cdFx0aWYgKG9wdFN0cmluZy5jaGFyQXQoaSArIDEpID09ICcrJykge1xuXHRcdFx0YWNjID0gbnVtID4+PiBhY2M7XG5cdFx0fSBlbHNlIHtcblx0XHRcdGFjYyA9IG51bSA8PCBhY2M7XG5cdFx0fVxuXHRcdGlmIChvcHRTdHJpbmcuY2hhckF0KGkpID09ICcrJykge1xuXHRcdFx0bnVtICs9IGFjYyAmIDQyOTQ5NjcyOTU7XG5cdFx0fSBlbHNlIHtcblx0XHRcdG51bSBePSBhY2M7XG5cdFx0fVxuXHR9XG5cdHJldHVybiBudW07XG59XG5cbmZ1bmN0aW9uIHRyYW5zZm9ybVF1ZXJ5KHF1ZXJ5KSB7XG5cdGNvbnN0IGJ5dGVzQXJyYXkgPSBbXTtcblx0bGV0IGlkeCA9IFtdO1xuXHRmb3IgKGxldCBpID0gMDsgaSA8IHF1ZXJ5Lmxlbmd0aDsgaSsrKSB7XG5cdFx0bGV0IGNoYXJDb2RlID0gcXVlcnkuY2hhckNvZGVBdChpKTtcblxuXHRcdGlmICgxMjggPiBjaGFyQ29kZSkge1xuXHRcdFx0Ynl0ZXNBcnJheVtpZHgrK10gPSBjaGFyQ29kZTtcblx0XHR9IGVsc2Uge1xuXHRcdFx0aWYgKDIwNDggPiBjaGFyQ29kZSkge1xuXHRcdFx0XHRieXRlc0FycmF5W2lkeCsrXSA9IChjaGFyQ29kZSA+PiA2KSB8IDE5Mjtcblx0XHRcdH0gZWxzZSB7XG5cdFx0XHRcdGlmIChcblx0XHRcdFx0XHQ1NTI5NiA9PSAoY2hhckNvZGUgJiA2NDUxMikgJiZcblx0XHRcdFx0XHRpICsgMSA8IHF1ZXJ5Lmxlbmd0aCAmJlxuXHRcdFx0XHRcdDU2MzIwID09IChxdWVyeS5jaGFyQ29kZUF0KGkgKyAxKSAmIDY0NTEyKVxuXHRcdFx0XHQpIHtcblx0XHRcdFx0XHRjaGFyQ29kZSA9XG5cdFx0XHRcdFx0XHQ2NTUzNiArXG5cdFx0XHRcdFx0XHQoKGNoYXJDb2RlICYgMTAyMykgPDwgMTApICtcblx0XHRcdFx0XHRcdChxdWVyeS5jaGFyQ29kZUF0KCsraSkgJiAxMDIzKTtcblx0XHRcdFx0XHRieXRlc0FycmF5W2lkeCsrXSA9IChjaGFyQ29kZSA+PiAxOCkgfCAyNDA7XG5cdFx0XHRcdFx0Ynl0ZXNBcnJheVtpZHgrK10gPSAoKGNoYXJDb2RlID4+IDEyKSAmIDYzKSB8IDEyODtcblx0XHRcdFx0fSBlbHNlIHtcblx0XHRcdFx0XHRieXRlc0FycmF5W2lkeCsrXSA9IChjaGFyQ29kZSA+PiAxMikgfCAyMjQ7XG5cdFx0XHRcdH1cblx0XHRcdFx0Ynl0ZXNBcnJheVtpZHgrK10gPSAoKGNoYXJDb2RlID4+IDYpICYgNjMpIHwgMTI4O1xuXHRcdFx0fVxuXHRcdFx0Ynl0ZXNBcnJheVtpZHgrK10gPSAoY2hhckNvZGUgJiA2MykgfCAxMjg7XG5cdFx0fVxuXHR9XG5cdHJldHVybiBieXRlc0FycmF5O1xufVxuXG5mdW5jdGlvbiBjYWxjSGFzaChxdWVyeSwgd2luZG93VGtrKSB7XG5cdGNvbnN0IHRra1NwbGl0ZWQgPSB3aW5kb3dUa2suc3BsaXQoJy4nKTtcblx0Y29uc3QgdGtrSW5kZXggPSBOdW1iZXIodGtrU3BsaXRlZFswXSkgfHwgMDtcblx0Y29uc3QgdGtrS2V5ID0gTnVtYmVyKHRra1NwbGl0ZWRbMV0pIHx8IDA7XG5cblx0Y29uc3QgYnl0ZXNBcnJheSA9IHRyYW5zZm9ybVF1ZXJ5KHF1ZXJ5KTtcblxuXHRsZXQgZW5jb25kaW5nUm91bmQgPSB0a2tJbmRleDtcblx0Zm9yIChsZXQgaSA9IDA7IGkgPCBieXRlc0FycmF5Lmxlbmd0aDsgaSsrKSB7XG5cdFx0ZW5jb25kaW5nUm91bmQgKz0gYnl0ZXNBcnJheVtpXTtcblx0XHRlbmNvbmRpbmdSb3VuZCA9IHNoaWZ0TGVmdE9yUmlnaHRUaGVuU3VtT3JYb3IoZW5jb25kaW5nUm91bmQsICcrLWFeKzYnKTtcblx0fVxuXHRlbmNvbmRpbmdSb3VuZCA9IHNoaWZ0TGVmdE9yUmlnaHRUaGVuU3VtT3JYb3IoZW5jb25kaW5nUm91bmQsICcrLTNeK2IrLWYnKTtcblxuXHRlbmNvbmRpbmdSb3VuZCBePSB0a2tLZXk7XG5cdGlmIChlbmNvbmRpbmdSb3VuZCA8PSAwKSB7XG5cdFx0ZW5jb25kaW5nUm91bmQgPSAoZW5jb25kaW5nUm91bmQgJiAyMTQ3NDgzNjQ3KSArIDIxNDc0ODM2NDg7XG5cdH1cblxuXHRjb25zdCBub3JtYWxpemVkUmVzdWx0ID0gZW5jb25kaW5nUm91bmQgJSAxMDAwMDAwO1xuXHRyZXR1cm4gbm9ybWFsaXplZFJlc3VsdC50b1N0cmluZygpICsgJy4nICsgKG5vcm1hbGl6ZWRSZXN1bHQgXiB0a2tJbmRleCk7XG59XG5cbi8qIGVzbGludC1lbmFibGUgbm8tYml0d2lzZSAqL1xuLy9cbi8vIE9iZnVzY2F0ZWQgbG9naWM6IEVORFxuLy9cblxuZXhwb3J0IGZ1bmN0aW9uIGdldFRva2VuKHF1ZXJ5KSB7XG5cdHJldHVybiBuZXcgUHJvbWlzZSgocmVzKSA9PiByZXMoeyB2YWx1ZTogY2FsY0hhc2gocXVlcnksIGdvb2dsZVRyYW5zbGF0ZVRLSykgfSkpO1xufVxuIl0sImZpbGUiOiJ0cmFuc2xhdG9ycy9Hb29nbGVUcmFuc2xhdG9yL3Rva2VuLmpzIn0=
+
+
+/***/ }),
+
+/***/ 389:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+var conventions = __webpack_require__(756);
+
+var NAMESPACE = conventions.NAMESPACE;
+
+/**
+ * A prerequisite for `[].filter`, to drop elements that are empty
+ * @param {string} input
+ * @returns {boolean}
+ */
+function notEmptyString (input) {
+	return input !== ''
+}
+/**
+ * @see https://infra.spec.whatwg.org/#split-on-ascii-whitespace
+ * @see https://infra.spec.whatwg.org/#ascii-whitespace
+ *
+ * @param {string} input
+ * @returns {string[]} (can be empty)
+ */
+function splitOnASCIIWhitespace(input) {
+	// U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE
+	return input ? input.split(/[\t\n\f\r ]+/).filter(notEmptyString) : []
+}
+
+/**
+ * Adds element as a key to current if it is not already present.
+ *
+ * @param {Record<string, boolean | undefined>} current
+ * @param {string} element
+ * @returns {Record<string, boolean | undefined>}
+ */
+function orderedSetReducer (current, element) {
+	if (!current.hasOwnProperty(element)) {
+		current[element] = true;
+	}
+	return current;
+}
+
+/**
+ * @see https://infra.spec.whatwg.org/#ordered-set
+ * @param {string} input
+ * @returns {string[]}
+ */
+function toOrderedSet(input) {
+	if (!input) return [];
+	var list = splitOnASCIIWhitespace(input);
+	return Object.keys(list.reduce(orderedSetReducer, {}))
+}
+
+/**
+ * Uses `list.indexOf` to implement something like `Array.prototype.includes`,
+ * which we can not rely on being available.
+ *
+ * @param {any[]} list
+ * @returns {function(any): boolean}
+ */
+function arrayIncludes (list) {
+	return function(element) {
+		return list && list.indexOf(element) !== -1;
+	}
+}
+
+function copy(src,dest){
+	for(var p in src){
+		dest[p] = src[p];
+	}
+}
+
+/**
+^\w+\.prototype\.([_\w]+)\s*=\s*((?:.*\{\s*?[\r\n][\s\S]*?^})|\S.*?(?=[;\r\n]));?
+^\w+\.prototype\.([_\w]+)\s*=\s*(\S.*?(?=[;\r\n]));?
+ */
+function _extends(Class,Super){
+	var pt = Class.prototype;
+	if(!(pt instanceof Super)){
+		function t(){};
+		t.prototype = Super.prototype;
+		t = new t();
+		copy(pt,t);
+		Class.prototype = pt = t;
+	}
+	if(pt.constructor != Class){
+		if(typeof Class != 'function'){
+			console.error("unknown Class:"+Class)
+		}
+		pt.constructor = Class
+	}
+}
+
+// Node Types
+var NodeType = {}
+var ELEMENT_NODE                = NodeType.ELEMENT_NODE                = 1;
+var ATTRIBUTE_NODE              = NodeType.ATTRIBUTE_NODE              = 2;
+var TEXT_NODE                   = NodeType.TEXT_NODE                   = 3;
+var CDATA_SECTION_NODE          = NodeType.CDATA_SECTION_NODE          = 4;
+var ENTITY_REFERENCE_NODE       = NodeType.ENTITY_REFERENCE_NODE       = 5;
+var ENTITY_NODE                 = NodeType.ENTITY_NODE                 = 6;
+var PROCESSING_INSTRUCTION_NODE = NodeType.PROCESSING_INSTRUCTION_NODE = 7;
+var COMMENT_NODE                = NodeType.COMMENT_NODE                = 8;
+var DOCUMENT_NODE               = NodeType.DOCUMENT_NODE               = 9;
+var DOCUMENT_TYPE_NODE          = NodeType.DOCUMENT_TYPE_NODE          = 10;
+var DOCUMENT_FRAGMENT_NODE      = NodeType.DOCUMENT_FRAGMENT_NODE      = 11;
+var NOTATION_NODE               = NodeType.NOTATION_NODE               = 12;
+
+// ExceptionCode
+var ExceptionCode = {}
+var ExceptionMessage = {};
+var INDEX_SIZE_ERR              = ExceptionCode.INDEX_SIZE_ERR              = ((ExceptionMessage[1]="Index size error"),1);
+var DOMSTRING_SIZE_ERR          = ExceptionCode.DOMSTRING_SIZE_ERR          = ((ExceptionMessage[2]="DOMString size error"),2);
+var HIERARCHY_REQUEST_ERR       = ExceptionCode.HIERARCHY_REQUEST_ERR       = ((ExceptionMessage[3]="Hierarchy request error"),3);
+var WRONG_DOCUMENT_ERR          = ExceptionCode.WRONG_DOCUMENT_ERR          = ((ExceptionMessage[4]="Wrong document"),4);
+var INVALID_CHARACTER_ERR       = ExceptionCode.INVALID_CHARACTER_ERR       = ((ExceptionMessage[5]="Invalid character"),5);
+var NO_DATA_ALLOWED_ERR         = ExceptionCode.NO_DATA_ALLOWED_ERR         = ((ExceptionMessage[6]="No data allowed"),6);
+var NO_MODIFICATION_ALLOWED_ERR = ExceptionCode.NO_MODIFICATION_ALLOWED_ERR = ((ExceptionMessage[7]="No modification allowed"),7);
+var NOT_FOUND_ERR               = ExceptionCode.NOT_FOUND_ERR               = ((ExceptionMessage[8]="Not found"),8);
+var NOT_SUPPORTED_ERR           = ExceptionCode.NOT_SUPPORTED_ERR           = ((ExceptionMessage[9]="Not supported"),9);
+var INUSE_ATTRIBUTE_ERR         = ExceptionCode.INUSE_ATTRIBUTE_ERR         = ((ExceptionMessage[10]="Attribute in use"),10);
+//level2
+var INVALID_STATE_ERR        	= ExceptionCode.INVALID_STATE_ERR        	= ((ExceptionMessage[11]="Invalid state"),11);
+var SYNTAX_ERR               	= ExceptionCode.SYNTAX_ERR               	= ((ExceptionMessage[12]="Syntax error"),12);
+var INVALID_MODIFICATION_ERR 	= ExceptionCode.INVALID_MODIFICATION_ERR 	= ((ExceptionMessage[13]="Invalid modification"),13);
+var NAMESPACE_ERR            	= ExceptionCode.NAMESPACE_ERR           	= ((ExceptionMessage[14]="Invalid namespace"),14);
+var INVALID_ACCESS_ERR       	= ExceptionCode.INVALID_ACCESS_ERR      	= ((ExceptionMessage[15]="Invalid access"),15);
+
+/**
+ * DOM Level 2
+ * Object DOMException
+ * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/ecma-script-binding.html
+ * @see http://www.w3.org/TR/REC-DOM-Level-1/ecma-script-language-binding.html
+ */
+function DOMException(code, message) {
+	if(message instanceof Error){
+		var error = message;
+	}else{
+		error = this;
+		Error.call(this, ExceptionMessage[code]);
+		this.message = ExceptionMessage[code];
+		if(Error.captureStackTrace) Error.captureStackTrace(this, DOMException);
+	}
+	error.code = code;
+	if(message) this.message = this.message + ": " + message;
+	return error;
+};
+DOMException.prototype = Error.prototype;
+copy(ExceptionCode,DOMException)
+
+/**
+ * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/core.html#ID-536297177
+ * The NodeList interface provides the abstraction of an ordered collection of nodes, without defining or constraining how this collection is implemented. NodeList objects in the DOM are live.
+ * The items in the NodeList are accessible via an integral index, starting from 0.
+ */
+function NodeList() {
+};
+NodeList.prototype = {
+	/**
+	 * The number of nodes in the list. The range of valid child node indices is 0 to length-1 inclusive.
+	 * @standard level1
+	 */
+	length:0, 
+	/**
+	 * Returns the indexth item in the collection. If index is greater than or equal to the number of nodes in the list, this returns null.
+	 * @standard level1
+	 * @param index  unsigned long 
+	 *   Index into the collection.
+	 * @return Node
+	 * 	The node at the indexth position in the NodeList, or null if that is not a valid index. 
+	 */
+	item: function(index) {
+		return this[index] || null;
+	},
+	toString:function(isHTML,nodeFilter){
+		for(var buf = [], i = 0;i<this.length;i++){
+			serializeToString(this[i],buf,isHTML,nodeFilter);
+		}
+		return buf.join('');
+	}
+};
+
+function LiveNodeList(node,refresh){
+	this._node = node;
+	this._refresh = refresh
+	_updateLiveList(this);
+}
+function _updateLiveList(list){
+	var inc = list._node._inc || list._node.ownerDocument._inc;
+	if(list._inc != inc){
+		var ls = list._refresh(list._node);
+		//console.log(ls.length)
+		__set__(list,'length',ls.length);
+		copy(ls,list);
+		list._inc = inc;
+	}
+}
+LiveNodeList.prototype.item = function(i){
+	_updateLiveList(this);
+	return this[i];
+}
+
+_extends(LiveNodeList,NodeList);
+
+/**
+ * Objects implementing the NamedNodeMap interface are used
+ * to represent collections of nodes that can be accessed by name.
+ * Note that NamedNodeMap does not inherit from NodeList;
+ * NamedNodeMaps are not maintained in any particular order.
+ * Objects contained in an object implementing NamedNodeMap may also be accessed by an ordinal index,
+ * but this is simply to allow convenient enumeration of the contents of a NamedNodeMap,
+ * and does not imply that the DOM specifies an order to these Nodes.
+ * NamedNodeMap objects in the DOM are live.
+ * used for attributes or DocumentType entities 
+ */
+function NamedNodeMap() {
+};
+
+function _findNodeIndex(list,node){
+	var i = list.length;
+	while(i--){
+		if(list[i] === node){return i}
+	}
+}
+
+function _addNamedNode(el,list,newAttr,oldAttr){
+	if(oldAttr){
+		list[_findNodeIndex(list,oldAttr)] = newAttr;
+	}else{
+		list[list.length++] = newAttr;
+	}
+	if(el){
+		newAttr.ownerElement = el;
+		var doc = el.ownerDocument;
+		if(doc){
+			oldAttr && _onRemoveAttribute(doc,el,oldAttr);
+			_onAddAttribute(doc,el,newAttr);
+		}
+	}
+}
+function _removeNamedNode(el,list,attr){
+	//console.log('remove attr:'+attr)
+	var i = _findNodeIndex(list,attr);
+	if(i>=0){
+		var lastIndex = list.length-1
+		while(i<lastIndex){
+			list[i] = list[++i]
+		}
+		list.length = lastIndex;
+		if(el){
+			var doc = el.ownerDocument;
+			if(doc){
+				_onRemoveAttribute(doc,el,attr);
+				attr.ownerElement = null;
+			}
+		}
+	}else{
+		throw DOMException(NOT_FOUND_ERR,new Error(el.tagName+'@'+attr))
+	}
+}
+NamedNodeMap.prototype = {
+	length:0,
+	item:NodeList.prototype.item,
+	getNamedItem: function(key) {
+//		if(key.indexOf(':')>0 || key == 'xmlns'){
+//			return null;
+//		}
+		//console.log()
+		var i = this.length;
+		while(i--){
+			var attr = this[i];
+			//console.log(attr.nodeName,key)
+			if(attr.nodeName == key){
+				return attr;
+			}
+		}
+	},
+	setNamedItem: function(attr) {
+		var el = attr.ownerElement;
+		if(el && el!=this._ownerElement){
+			throw new DOMException(INUSE_ATTRIBUTE_ERR);
+		}
+		var oldAttr = this.getNamedItem(attr.nodeName);
+		_addNamedNode(this._ownerElement,this,attr,oldAttr);
+		return oldAttr;
+	},
+	/* returns Node */
+	setNamedItemNS: function(attr) {// raises: WRONG_DOCUMENT_ERR,NO_MODIFICATION_ALLOWED_ERR,INUSE_ATTRIBUTE_ERR
+		var el = attr.ownerElement, oldAttr;
+		if(el && el!=this._ownerElement){
+			throw new DOMException(INUSE_ATTRIBUTE_ERR);
+		}
+		oldAttr = this.getNamedItemNS(attr.namespaceURI,attr.localName);
+		_addNamedNode(this._ownerElement,this,attr,oldAttr);
+		return oldAttr;
+	},
+
+	/* returns Node */
+	removeNamedItem: function(key) {
+		var attr = this.getNamedItem(key);
+		_removeNamedNode(this._ownerElement,this,attr);
+		return attr;
+		
+		
+	},// raises: NOT_FOUND_ERR,NO_MODIFICATION_ALLOWED_ERR
+	
+	//for level2
+	removeNamedItemNS:function(namespaceURI,localName){
+		var attr = this.getNamedItemNS(namespaceURI,localName);
+		_removeNamedNode(this._ownerElement,this,attr);
+		return attr;
+	},
+	getNamedItemNS: function(namespaceURI, localName) {
+		var i = this.length;
+		while(i--){
+			var node = this[i];
+			if(node.localName == localName && node.namespaceURI == namespaceURI){
+				return node;
+			}
+		}
+		return null;
+	}
+};
+
+/**
+ * The DOMImplementation interface represents an object providing methods
+ * which are not dependent on any particular document.
+ * Such an object is returned by the `Document.implementation` property.
+ *
+ * __The individual methods describe the differences compared to the specs.__
+ *
+ * @constructor
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMImplementation MDN
+ * @see https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html#ID-102161490 DOM Level 1 Core (Initial)
+ * @see https://www.w3.org/TR/DOM-Level-2-Core/core.html#ID-102161490 DOM Level 2 Core
+ * @see https://www.w3.org/TR/DOM-Level-3-Core/core.html#ID-102161490 DOM Level 3 Core
+ * @see https://dom.spec.whatwg.org/#domimplementation DOM Living Standard
+ */
+function DOMImplementation() {
+}
+
+DOMImplementation.prototype = {
+	/**
+	 * The DOMImplementation.hasFeature() method returns a Boolean flag indicating if a given feature is supported.
+	 * The different implementations fairly diverged in what kind of features were reported.
+	 * The latest version of the spec settled to force this method to always return true, where the functionality was accurate and in use.
+	 *
+	 * @deprecated It is deprecated and modern browsers return true in all cases.
+	 *
+	 * @param {string} feature
+	 * @param {string} [version]
+	 * @returns {boolean} always true
+	 *
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMImplementation/hasFeature MDN
+	 * @see https://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html#ID-5CED94D7 DOM Level 1 Core
+	 * @see https://dom.spec.whatwg.org/#dom-domimplementation-hasfeature DOM Living Standard
+	 */
+	hasFeature: function(feature, version) {
+			return true;
+	},
+	/**
+	 * Creates an XML Document object of the specified type with its document element.
+	 *
+	 * __It behaves slightly different from the description in the living standard__:
+	 * - There is no interface/class `XMLDocument`, it returns a `Document` instance.
+	 * - `contentType`, `encoding`, `mode`, `origin`, `url` fields are currently not declared.
+	 * - this implementation is not validating names or qualified names
+	 *   (when parsing XML strings, the SAX parser takes care of that)
+	 *
+	 * @param {string|null} namespaceURI
+	 * @param {string} qualifiedName
+	 * @param {DocumentType=null} doctype
+	 * @returns {Document}
+	 *
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMImplementation/createDocument MDN
+	 * @see https://www.w3.org/TR/DOM-Level-2-Core/core.html#Level-2-Core-DOM-createDocument DOM Level 2 Core (initial)
+	 * @see https://dom.spec.whatwg.org/#dom-domimplementation-createdocument  DOM Level 2 Core
+	 *
+	 * @see https://dom.spec.whatwg.org/#validate-and-extract DOM: Validate and extract
+	 * @see https://www.w3.org/TR/xml/#NT-NameStartChar XML Spec: Names
+	 * @see https://www.w3.org/TR/xml-names/#ns-qualnames XML Namespaces: Qualified names
+	 */
+	createDocument: function(namespaceURI,  qualifiedName, doctype){
+		var doc = new Document();
+		doc.implementation = this;
+		doc.childNodes = new NodeList();
+		doc.doctype = doctype || null;
+		if (doctype){
+			doc.appendChild(doctype);
+		}
+		if (qualifiedName){
+			var root = doc.createElementNS(namespaceURI, qualifiedName);
+			doc.appendChild(root);
+		}
+		return doc;
+	},
+	/**
+	 * Returns a doctype, with the given `qualifiedName`, `publicId`, and `systemId`.
+	 *
+	 * __This behavior is slightly different from the in the specs__:
+	 * - this implementation is not validating names or qualified names
+	 *   (when parsing XML strings, the SAX parser takes care of that)
+	 *
+	 * @param {string} qualifiedName
+	 * @param {string} [publicId]
+	 * @param {string} [systemId]
+	 * @returns {DocumentType} which can either be used with `DOMImplementation.createDocument` upon document creation
+	 * 				  or can be put into the document via methods like `Node.insertBefore()` or `Node.replaceChild()`
+	 *
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMImplementation/createDocumentType MDN
+	 * @see https://www.w3.org/TR/DOM-Level-2-Core/core.html#Level-2-Core-DOM-createDocType DOM Level 2 Core
+	 * @see https://dom.spec.whatwg.org/#dom-domimplementation-createdocumenttype DOM Living Standard
+	 *
+	 * @see https://dom.spec.whatwg.org/#validate-and-extract DOM: Validate and extract
+	 * @see https://www.w3.org/TR/xml/#NT-NameStartChar XML Spec: Names
+	 * @see https://www.w3.org/TR/xml-names/#ns-qualnames XML Namespaces: Qualified names
+	 */
+	createDocumentType: function(qualifiedName, publicId, systemId){
+		var node = new DocumentType();
+		node.name = qualifiedName;
+		node.nodeName = qualifiedName;
+		node.publicId = publicId || '';
+		node.systemId = systemId || '';
+
+		return node;
+	}
+};
+
+
+/**
+ * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/core.html#ID-1950641247
+ */
+
+function Node() {
+};
+
+Node.prototype = {
+	firstChild : null,
+	lastChild : null,
+	previousSibling : null,
+	nextSibling : null,
+	attributes : null,
+	parentNode : null,
+	childNodes : null,
+	ownerDocument : null,
+	nodeValue : null,
+	namespaceURI : null,
+	prefix : null,
+	localName : null,
+	// Modified in DOM Level 2:
+	insertBefore:function(newChild, refChild){//raises 
+		return _insertBefore(this,newChild,refChild);
+	},
+	replaceChild:function(newChild, oldChild){//raises 
+		this.insertBefore(newChild,oldChild);
+		if(oldChild){
+			this.removeChild(oldChild);
+		}
+	},
+	removeChild:function(oldChild){
+		return _removeChild(this,oldChild);
+	},
+	appendChild:function(newChild){
+		return this.insertBefore(newChild,null);
+	},
+	hasChildNodes:function(){
+		return this.firstChild != null;
+	},
+	cloneNode:function(deep){
+		return cloneNode(this.ownerDocument||this,this,deep);
+	},
+	// Modified in DOM Level 2:
+	normalize:function(){
+		var child = this.firstChild;
+		while(child){
+			var next = child.nextSibling;
+			if(next && next.nodeType == TEXT_NODE && child.nodeType == TEXT_NODE){
+				this.removeChild(next);
+				child.appendData(next.data);
+			}else{
+				child.normalize();
+				child = next;
+			}
+		}
+	},
+  	// Introduced in DOM Level 2:
+	isSupported:function(feature, version){
+		return this.ownerDocument.implementation.hasFeature(feature,version);
+	},
+    // Introduced in DOM Level 2:
+    hasAttributes:function(){
+    	return this.attributes.length>0;
+    },
+	/**
+	 * Look up the prefix associated to the given namespace URI, starting from this node.
+	 * **The default namespace declarations are ignored by this method.**
+	 * See Namespace Prefix Lookup for details on the algorithm used by this method.
+	 *
+	 * _Note: The implementation seems to be incomplete when compared to the algorithm described in the specs._
+	 *
+	 * @param {string | null} namespaceURI
+	 * @returns {string | null}
+	 * @see https://www.w3.org/TR/DOM-Level-3-Core/core.html#Node3-lookupNamespacePrefix
+	 * @see https://www.w3.org/TR/DOM-Level-3-Core/namespaces-algorithms.html#lookupNamespacePrefixAlgo
+	 * @see https://dom.spec.whatwg.org/#dom-node-lookupprefix
+	 * @see https://github.com/xmldom/xmldom/issues/322
+	 */
+    lookupPrefix:function(namespaceURI){
+    	var el = this;
+    	while(el){
+    		var map = el._nsMap;
+    		//console.dir(map)
+    		if(map){
+    			for(var n in map){
+    				if(map[n] == namespaceURI){
+    					return n;
+    				}
+    			}
+    		}
+    		el = el.nodeType == ATTRIBUTE_NODE?el.ownerDocument : el.parentNode;
+    	}
+    	return null;
+    },
+    // Introduced in DOM Level 3:
+    lookupNamespaceURI:function(prefix){
+    	var el = this;
+    	while(el){
+    		var map = el._nsMap;
+    		//console.dir(map)
+    		if(map){
+    			if(prefix in map){
+    				return map[prefix] ;
+    			}
+    		}
+    		el = el.nodeType == ATTRIBUTE_NODE?el.ownerDocument : el.parentNode;
+    	}
+    	return null;
+    },
+    // Introduced in DOM Level 3:
+    isDefaultNamespace:function(namespaceURI){
+    	var prefix = this.lookupPrefix(namespaceURI);
+    	return prefix == null;
+    }
+};
+
+
+function _xmlEncoder(c){
+	return c == '<' && '&lt;' ||
+         c == '>' && '&gt;' ||
+         c == '&' && '&amp;' ||
+         c == '"' && '&quot;' ||
+         '&#'+c.charCodeAt()+';'
+}
+
+
+copy(NodeType,Node);
+copy(NodeType,Node.prototype);
+
+/**
+ * @param callback return true for continue,false for break
+ * @return boolean true: break visit;
+ */
+function _visitNode(node,callback){
+	if(callback(node)){
+		return true;
+	}
+	if(node = node.firstChild){
+		do{
+			if(_visitNode(node,callback)){return true}
+        }while(node=node.nextSibling)
+    }
+}
+
+
+
+function Document(){
+}
+
+function _onAddAttribute(doc,el,newAttr){
+	doc && doc._inc++;
+	var ns = newAttr.namespaceURI ;
+	if(ns === NAMESPACE.XMLNS){
+		//update namespace
+		el._nsMap[newAttr.prefix?newAttr.localName:''] = newAttr.value
+	}
+}
+
+function _onRemoveAttribute(doc,el,newAttr,remove){
+	doc && doc._inc++;
+	var ns = newAttr.namespaceURI ;
+	if(ns === NAMESPACE.XMLNS){
+		//update namespace
+		delete el._nsMap[newAttr.prefix?newAttr.localName:'']
+	}
+}
+
+/**
+ * Updates `el.childNodes`, updating the indexed items and it's `length`.
+ * Passing `newChild` means it will be appended.
+ * Otherwise it's assumed that an item has been removed,
+ * and `el.firstNode` and it's `.nextSibling` are used
+ * to walk the current list of child nodes.
+ *
+ * @param {Document} doc
+ * @param {Node} el
+ * @param {Node} [newChild]
+ * @private
+ */
+function _onUpdateChild (doc, el, newChild) {
+	if(doc && doc._inc){
+		doc._inc++;
+		//update childNodes
+		var cs = el.childNodes;
+		if (newChild) {
+			cs[cs.length++] = newChild;
+		} else {
+			var child = el.firstChild;
+			var i = 0;
+			while (child) {
+				cs[i++] = child;
+				child = child.nextSibling;
+			}
+			cs.length = i;
+			delete cs[cs.length];
+		}
+	}
+}
+
+/**
+ * Removes the connections between `parentNode` and `child`
+ * and any existing `child.previousSibling` or `child.nextSibling`.
+ *
+ * @see https://github.com/xmldom/xmldom/issues/135
+ * @see https://github.com/xmldom/xmldom/issues/145
+ *
+ * @param {Node} parentNode
+ * @param {Node} child
+ * @returns {Node} the child that was removed.
+ * @private
+ */
+function _removeChild (parentNode, child) {
+	var previous = child.previousSibling;
+	var next = child.nextSibling;
+	if (previous) {
+		previous.nextSibling = next;
+	} else {
+		parentNode.firstChild = next;
+	}
+	if (next) {
+		next.previousSibling = previous;
+	} else {
+		parentNode.lastChild = previous;
+	}
+	child.parentNode = null;
+	child.previousSibling = null;
+	child.nextSibling = null;
+	_onUpdateChild(parentNode.ownerDocument, parentNode);
+	return child;
+}
+/**
+ * preformance key(refChild == null)
+ */
+function _insertBefore(parentNode,newChild,nextChild){
+	var cp = newChild.parentNode;
+	if(cp){
+		cp.removeChild(newChild);//remove and update
+	}
+	if(newChild.nodeType === DOCUMENT_FRAGMENT_NODE){
+		var newFirst = newChild.firstChild;
+		if (newFirst == null) {
+			return newChild;
+		}
+		var newLast = newChild.lastChild;
+	}else{
+		newFirst = newLast = newChild;
+	}
+	var pre = nextChild ? nextChild.previousSibling : parentNode.lastChild;
+
+	newFirst.previousSibling = pre;
+	newLast.nextSibling = nextChild;
+	
+	
+	if(pre){
+		pre.nextSibling = newFirst;
+	}else{
+		parentNode.firstChild = newFirst;
+	}
+	if(nextChild == null){
+		parentNode.lastChild = newLast;
+	}else{
+		nextChild.previousSibling = newLast;
+	}
+	do{
+		newFirst.parentNode = parentNode;
+	}while(newFirst !== newLast && (newFirst= newFirst.nextSibling))
+	_onUpdateChild(parentNode.ownerDocument||parentNode,parentNode);
+	//console.log(parentNode.lastChild.nextSibling == null)
+	if (newChild.nodeType == DOCUMENT_FRAGMENT_NODE) {
+		newChild.firstChild = newChild.lastChild = null;
+	}
+	return newChild;
+}
+
+/**
+ * Appends `newChild` to `parentNode`.
+ * If `newChild` is already connected to a `parentNode` it is first removed from it.
+ *
+ * @see https://github.com/xmldom/xmldom/issues/135
+ * @see https://github.com/xmldom/xmldom/issues/145
+ * @param {Node} parentNode
+ * @param {Node} newChild
+ * @returns {Node}
+ * @private
+ */
+function _appendSingleChild (parentNode, newChild) {
+	if (newChild.parentNode) {
+		newChild.parentNode.removeChild(newChild);
+	}
+	newChild.parentNode = parentNode;
+	newChild.previousSibling = parentNode.lastChild;
+	newChild.nextSibling = null;
+	if (newChild.previousSibling) {
+		newChild.previousSibling.nextSibling = newChild;
+	} else {
+		parentNode.firstChild = newChild;
+	}
+	parentNode.lastChild = newChild;
+	_onUpdateChild(parentNode.ownerDocument, parentNode, newChild);
+	return newChild;
+}
+
+Document.prototype = {
+	//implementation : null,
+	nodeName :  '#document',
+	nodeType :  DOCUMENT_NODE,
+	/**
+	 * The DocumentType node of the document.
+	 *
+	 * @readonly
+	 * @type DocumentType
+	 */
+	doctype :  null,
+	documentElement :  null,
+	_inc : 1,
+
+	insertBefore :  function(newChild, refChild){//raises
+		if(newChild.nodeType == DOCUMENT_FRAGMENT_NODE){
+			var child = newChild.firstChild;
+			while(child){
+				var next = child.nextSibling;
+				this.insertBefore(child,refChild);
+				child = next;
+			}
+			return newChild;
+		}
+		if(this.documentElement == null && newChild.nodeType == ELEMENT_NODE){
+			this.documentElement = newChild;
+		}
+
+		return _insertBefore(this,newChild,refChild),(newChild.ownerDocument = this),newChild;
+	},
+	removeChild :  function(oldChild){
+		if(this.documentElement == oldChild){
+			this.documentElement = null;
+		}
+		return _removeChild(this,oldChild);
+	},
+	// Introduced in DOM Level 2:
+	importNode : function(importedNode,deep){
+		return importNode(this,importedNode,deep);
+	},
+	// Introduced in DOM Level 2:
+	getElementById :	function(id){
+		var rtv = null;
+		_visitNode(this.documentElement,function(node){
+			if(node.nodeType == ELEMENT_NODE){
+				if(node.getAttribute('id') == id){
+					rtv = node;
+					return true;
+				}
+			}
+		})
+		return rtv;
+	},
+
+	/**
+	 * The `getElementsByClassName` method of `Document` interface returns an array-like object
+	 * of all child elements which have **all** of the given class name(s).
+	 *
+	 * Returns an empty list if `classeNames` is an empty string or only contains HTML white space characters.
+	 *
+	 *
+	 * Warning: This is a live LiveNodeList.
+	 * Changes in the DOM will reflect in the array as the changes occur.
+	 * If an element selected by this array no longer qualifies for the selector,
+	 * it will automatically be removed. Be aware of this for iteration purposes.
+	 *
+	 * @param {string} classNames is a string representing the class name(s) to match; multiple class names are separated by (ASCII-)whitespace
+	 *
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/Document/getElementsByClassName
+	 * @see https://dom.spec.whatwg.org/#concept-getelementsbyclassname
+	 */
+	getElementsByClassName: function(classNames) {
+		var classNamesSet = toOrderedSet(classNames)
+		return new LiveNodeList(this, function(base) {
+			var ls = [];
+			if (classNamesSet.length > 0) {
+				_visitNode(base.documentElement, function(node) {
+					if(node !== base && node.nodeType === ELEMENT_NODE) {
+						var nodeClassNames = node.getAttribute('class')
+						// can be null if the attribute does not exist
+						if (nodeClassNames) {
+							// before splitting and iterating just compare them for the most common case
+							var matches = classNames === nodeClassNames;
+							if (!matches) {
+								var nodeClassNamesSet = toOrderedSet(nodeClassNames)
+								matches = classNamesSet.every(arrayIncludes(nodeClassNamesSet))
+							}
+							if(matches) {
+								ls.push(node);
+							}
+						}
+					}
+				});
+			}
+			return ls;
+		});
+	},
+
+	//document factory method:
+	createElement :	function(tagName){
+		var node = new Element();
+		node.ownerDocument = this;
+		node.nodeName = tagName;
+		node.tagName = tagName;
+		node.localName = tagName;
+		node.childNodes = new NodeList();
+		var attrs	= node.attributes = new NamedNodeMap();
+		attrs._ownerElement = node;
+		return node;
+	},
+	createDocumentFragment :	function(){
+		var node = new DocumentFragment();
+		node.ownerDocument = this;
+		node.childNodes = new NodeList();
+		return node;
+	},
+	createTextNode :	function(data){
+		var node = new Text();
+		node.ownerDocument = this;
+		node.appendData(data)
+		return node;
+	},
+	createComment :	function(data){
+		var node = new Comment();
+		node.ownerDocument = this;
+		node.appendData(data)
+		return node;
+	},
+	createCDATASection :	function(data){
+		var node = new CDATASection();
+		node.ownerDocument = this;
+		node.appendData(data)
+		return node;
+	},
+	createProcessingInstruction :	function(target,data){
+		var node = new ProcessingInstruction();
+		node.ownerDocument = this;
+		node.tagName = node.target = target;
+		node.nodeValue= node.data = data;
+		return node;
+	},
+	createAttribute :	function(name){
+		var node = new Attr();
+		node.ownerDocument	= this;
+		node.name = name;
+		node.nodeName	= name;
+		node.localName = name;
+		node.specified = true;
+		return node;
+	},
+	createEntityReference :	function(name){
+		var node = new EntityReference();
+		node.ownerDocument	= this;
+		node.nodeName	= name;
+		return node;
+	},
+	// Introduced in DOM Level 2:
+	createElementNS :	function(namespaceURI,qualifiedName){
+		var node = new Element();
+		var pl = qualifiedName.split(':');
+		var attrs	= node.attributes = new NamedNodeMap();
+		node.childNodes = new NodeList();
+		node.ownerDocument = this;
+		node.nodeName = qualifiedName;
+		node.tagName = qualifiedName;
+		node.namespaceURI = namespaceURI;
+		if(pl.length == 2){
+			node.prefix = pl[0];
+			node.localName = pl[1];
+		}else{
+			//el.prefix = null;
+			node.localName = qualifiedName;
+		}
+		attrs._ownerElement = node;
+		return node;
+	},
+	// Introduced in DOM Level 2:
+	createAttributeNS :	function(namespaceURI,qualifiedName){
+		var node = new Attr();
+		var pl = qualifiedName.split(':');
+		node.ownerDocument = this;
+		node.nodeName = qualifiedName;
+		node.name = qualifiedName;
+		node.namespaceURI = namespaceURI;
+		node.specified = true;
+		if(pl.length == 2){
+			node.prefix = pl[0];
+			node.localName = pl[1];
+		}else{
+			//el.prefix = null;
+			node.localName = qualifiedName;
+		}
+		return node;
+	}
+};
+_extends(Document,Node);
+
+
+function Element() {
+	this._nsMap = {};
+};
+Element.prototype = {
+	nodeType : ELEMENT_NODE,
+	hasAttribute : function(name){
+		return this.getAttributeNode(name)!=null;
+	},
+	getAttribute : function(name){
+		var attr = this.getAttributeNode(name);
+		return attr && attr.value || '';
+	},
+	getAttributeNode : function(name){
+		return this.attributes.getNamedItem(name);
+	},
+	setAttribute : function(name, value){
+		var attr = this.ownerDocument.createAttribute(name);
+		attr.value = attr.nodeValue = "" + value;
+		this.setAttributeNode(attr)
+	},
+	removeAttribute : function(name){
+		var attr = this.getAttributeNode(name)
+		attr && this.removeAttributeNode(attr);
+	},
+	
+	//four real opeartion method
+	appendChild:function(newChild){
+		if(newChild.nodeType === DOCUMENT_FRAGMENT_NODE){
+			return this.insertBefore(newChild,null);
+		}else{
+			return _appendSingleChild(this,newChild);
+		}
+	},
+	setAttributeNode : function(newAttr){
+		return this.attributes.setNamedItem(newAttr);
+	},
+	setAttributeNodeNS : function(newAttr){
+		return this.attributes.setNamedItemNS(newAttr);
+	},
+	removeAttributeNode : function(oldAttr){
+		//console.log(this == oldAttr.ownerElement)
+		return this.attributes.removeNamedItem(oldAttr.nodeName);
+	},
+	//get real attribute name,and remove it by removeAttributeNode
+	removeAttributeNS : function(namespaceURI, localName){
+		var old = this.getAttributeNodeNS(namespaceURI, localName);
+		old && this.removeAttributeNode(old);
+	},
+	
+	hasAttributeNS : function(namespaceURI, localName){
+		return this.getAttributeNodeNS(namespaceURI, localName)!=null;
+	},
+	getAttributeNS : function(namespaceURI, localName){
+		var attr = this.getAttributeNodeNS(namespaceURI, localName);
+		return attr && attr.value || '';
+	},
+	setAttributeNS : function(namespaceURI, qualifiedName, value){
+		var attr = this.ownerDocument.createAttributeNS(namespaceURI, qualifiedName);
+		attr.value = attr.nodeValue = "" + value;
+		this.setAttributeNode(attr)
+	},
+	getAttributeNodeNS : function(namespaceURI, localName){
+		return this.attributes.getNamedItemNS(namespaceURI, localName);
+	},
+	
+	getElementsByTagName : function(tagName){
+		return new LiveNodeList(this,function(base){
+			var ls = [];
+			_visitNode(base,function(node){
+				if(node !== base && node.nodeType == ELEMENT_NODE && (tagName === '*' || node.tagName == tagName)){
+					ls.push(node);
+				}
+			});
+			return ls;
+		});
+	},
+	getElementsByTagNameNS : function(namespaceURI, localName){
+		return new LiveNodeList(this,function(base){
+			var ls = [];
+			_visitNode(base,function(node){
+				if(node !== base && node.nodeType === ELEMENT_NODE && (namespaceURI === '*' || node.namespaceURI === namespaceURI) && (localName === '*' || node.localName == localName)){
+					ls.push(node);
+				}
+			});
+			return ls;
+			
+		});
+	}
+};
+Document.prototype.getElementsByTagName = Element.prototype.getElementsByTagName;
+Document.prototype.getElementsByTagNameNS = Element.prototype.getElementsByTagNameNS;
+
+
+_extends(Element,Node);
+function Attr() {
+};
+Attr.prototype.nodeType = ATTRIBUTE_NODE;
+_extends(Attr,Node);
+
+
+function CharacterData() {
+};
+CharacterData.prototype = {
+	data : '',
+	substringData : function(offset, count) {
+		return this.data.substring(offset, offset+count);
+	},
+	appendData: function(text) {
+		text = this.data+text;
+		this.nodeValue = this.data = text;
+		this.length = text.length;
+	},
+	insertData: function(offset,text) {
+		this.replaceData(offset,0,text);
+	
+	},
+	appendChild:function(newChild){
+		throw new Error(ExceptionMessage[HIERARCHY_REQUEST_ERR])
+	},
+	deleteData: function(offset, count) {
+		this.replaceData(offset,count,"");
+	},
+	replaceData: function(offset, count, text) {
+		var start = this.data.substring(0,offset);
+		var end = this.data.substring(offset+count);
+		text = start + text + end;
+		this.nodeValue = this.data = text;
+		this.length = text.length;
+	}
+}
+_extends(CharacterData,Node);
+function Text() {
+};
+Text.prototype = {
+	nodeName : "#text",
+	nodeType : TEXT_NODE,
+	splitText : function(offset) {
+		var text = this.data;
+		var newText = text.substring(offset);
+		text = text.substring(0, offset);
+		this.data = this.nodeValue = text;
+		this.length = text.length;
+		var newNode = this.ownerDocument.createTextNode(newText);
+		if(this.parentNode){
+			this.parentNode.insertBefore(newNode, this.nextSibling);
+		}
+		return newNode;
+	}
+}
+_extends(Text,CharacterData);
+function Comment() {
+};
+Comment.prototype = {
+	nodeName : "#comment",
+	nodeType : COMMENT_NODE
+}
+_extends(Comment,CharacterData);
+
+function CDATASection() {
+};
+CDATASection.prototype = {
+	nodeName : "#cdata-section",
+	nodeType : CDATA_SECTION_NODE
+}
+_extends(CDATASection,CharacterData);
+
+
+function DocumentType() {
+};
+DocumentType.prototype.nodeType = DOCUMENT_TYPE_NODE;
+_extends(DocumentType,Node);
+
+function Notation() {
+};
+Notation.prototype.nodeType = NOTATION_NODE;
+_extends(Notation,Node);
+
+function Entity() {
+};
+Entity.prototype.nodeType = ENTITY_NODE;
+_extends(Entity,Node);
+
+function EntityReference() {
+};
+EntityReference.prototype.nodeType = ENTITY_REFERENCE_NODE;
+_extends(EntityReference,Node);
+
+function DocumentFragment() {
+};
+DocumentFragment.prototype.nodeName =	"#document-fragment";
+DocumentFragment.prototype.nodeType =	DOCUMENT_FRAGMENT_NODE;
+_extends(DocumentFragment,Node);
+
+
+function ProcessingInstruction() {
+}
+ProcessingInstruction.prototype.nodeType = PROCESSING_INSTRUCTION_NODE;
+_extends(ProcessingInstruction,Node);
+function XMLSerializer(){}
+XMLSerializer.prototype.serializeToString = function(node,isHtml,nodeFilter){
+	return nodeSerializeToString.call(node,isHtml,nodeFilter);
+}
+Node.prototype.toString = nodeSerializeToString;
+function nodeSerializeToString(isHtml,nodeFilter){
+	var buf = [];
+	var refNode = this.nodeType == 9 && this.documentElement || this;
+	var prefix = refNode.prefix;
+	var uri = refNode.namespaceURI;
+	
+	if(uri && prefix == null){
+		//console.log(prefix)
+		var prefix = refNode.lookupPrefix(uri);
+		if(prefix == null){
+			//isHTML = true;
+			var visibleNamespaces=[
+			{namespace:uri,prefix:null}
+			//{namespace:uri,prefix:''}
+			]
+		}
+	}
+	serializeToString(this,buf,isHtml,nodeFilter,visibleNamespaces);
+	//console.log('###',this.nodeType,uri,prefix,buf.join(''))
+	return buf.join('');
+}
+
+function needNamespaceDefine(node, isHTML, visibleNamespaces) {
+	var prefix = node.prefix || '';
+	var uri = node.namespaceURI;
+	// According to [Namespaces in XML 1.0](https://www.w3.org/TR/REC-xml-names/#ns-using) ,
+	// and more specifically https://www.w3.org/TR/REC-xml-names/#nsc-NoPrefixUndecl :
+	// > In a namespace declaration for a prefix [...], the attribute value MUST NOT be empty.
+	// in a similar manner [Namespaces in XML 1.1](https://www.w3.org/TR/xml-names11/#ns-using)
+	// and more specifically https://www.w3.org/TR/xml-names11/#nsc-NSDeclared :
+	// > [...] Furthermore, the attribute value [...] must not be an empty string.
+	// so serializing empty namespace value like xmlns:ds="" would produce an invalid XML document.
+	if (!uri) {
+		return false;
+	}
+	if (prefix === "xml" && uri === NAMESPACE.XML || uri === NAMESPACE.XMLNS) {
+		return false;
+	}
+	
+	var i = visibleNamespaces.length 
+	while (i--) {
+		var ns = visibleNamespaces[i];
+		// get namespace prefix
+		if (ns.prefix === prefix) {
+			return ns.namespace !== uri;
+		}
+	}
+	return true;
+}
+/**
+ * Well-formed constraint: No < in Attribute Values
+ * > The replacement text of any entity referred to directly or indirectly
+ * > in an attribute value must not contain a <.
+ * @see https://www.w3.org/TR/xml11/#CleanAttrVals
+ * @see https://www.w3.org/TR/xml11/#NT-AttValue
+ *
+ * Literal whitespace other than space that appear in attribute values
+ * are serialized as their entity references, so they will be preserved.
+ * (In contrast to whitespace literals in the input which are normalized to spaces)
+ * @see https://www.w3.org/TR/xml11/#AVNormalize
+ */
+function addSerializedAttribute(buf, qualifiedName, value) {
+	buf.push(' ', qualifiedName, '="', value.replace(/[<&"\t\n\r]/g, _xmlEncoder), '"')
+}
+
+function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
+	if (!visibleNamespaces) {
+		visibleNamespaces = [];
+	}
+
+	if(nodeFilter){
+		node = nodeFilter(node);
+		if(node){
+			if(typeof node == 'string'){
+				buf.push(node);
+				return;
+			}
+		}else{
+			return;
+		}
+		//buf.sort.apply(attrs, attributeSorter);
+	}
+
+	switch(node.nodeType){
+	case ELEMENT_NODE:
+		var attrs = node.attributes;
+		var len = attrs.length;
+		var child = node.firstChild;
+		var nodeName = node.tagName;
+		
+		isHTML = NAMESPACE.isHTML(node.namespaceURI) || isHTML
+
+		var prefixedNodeName = nodeName
+		if (!isHTML && !node.prefix && node.namespaceURI) {
+			var defaultNS
+			// lookup current default ns from `xmlns` attribute
+			for (var ai = 0; ai < attrs.length; ai++) {
+				if (attrs.item(ai).name === 'xmlns') {
+					defaultNS = attrs.item(ai).value
+					break
+				}
+			}
+			if (!defaultNS) {
+				// lookup current default ns in visibleNamespaces
+				for (var nsi = visibleNamespaces.length - 1; nsi >= 0; nsi--) {
+					var namespace = visibleNamespaces[nsi]
+					if (namespace.prefix === '' && namespace.namespace === node.namespaceURI) {
+						defaultNS = namespace.namespace
+						break
+					}
+				}
+			}
+			if (defaultNS !== node.namespaceURI) {
+				for (var nsi = visibleNamespaces.length - 1; nsi >= 0; nsi--) {
+					var namespace = visibleNamespaces[nsi]
+					if (namespace.namespace === node.namespaceURI) {
+						if (namespace.prefix) {
+							prefixedNodeName = namespace.prefix + ':' + nodeName
+						}
+						break
+					}
+				}
+			}
+		}
+
+		buf.push('<', prefixedNodeName);
+
+		for(var i=0;i<len;i++){
+			// add namespaces for attributes
+			var attr = attrs.item(i);
+			if (attr.prefix == 'xmlns') {
+				visibleNamespaces.push({ prefix: attr.localName, namespace: attr.value });
+			}else if(attr.nodeName == 'xmlns'){
+				visibleNamespaces.push({ prefix: '', namespace: attr.value });
+			}
+		}
+
+		for(var i=0;i<len;i++){
+			var attr = attrs.item(i);
+			if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
+				var prefix = attr.prefix||'';
+				var uri = attr.namespaceURI;
+				addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
+				visibleNamespaces.push({ prefix: prefix, namespace:uri });
+			}
+			serializeToString(attr,buf,isHTML,nodeFilter,visibleNamespaces);
+		}
+
+		// add namespace for current node		
+		if (nodeName === prefixedNodeName && needNamespaceDefine(node, isHTML, visibleNamespaces)) {
+			var prefix = node.prefix||'';
+			var uri = node.namespaceURI;
+			addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
+			visibleNamespaces.push({ prefix: prefix, namespace:uri });
+		}
+		
+		if(child || isHTML && !/^(?:meta|link|img|br|hr|input)$/i.test(nodeName)){
+			buf.push('>');
+			//if is cdata child node
+			if(isHTML && /^script$/i.test(nodeName)){
+				while(child){
+					if(child.data){
+						buf.push(child.data);
+					}else{
+						serializeToString(child, buf, isHTML, nodeFilter, visibleNamespaces.slice());
+					}
+					child = child.nextSibling;
+				}
+			}else
+			{
+				while(child){
+					serializeToString(child, buf, isHTML, nodeFilter, visibleNamespaces.slice());
+					child = child.nextSibling;
+				}
+			}
+			buf.push('</',prefixedNodeName,'>');
+		}else{
+			buf.push('/>');
+		}
+		// remove added visible namespaces
+		//visibleNamespaces.length = startVisibleNamespaces;
+		return;
+	case DOCUMENT_NODE:
+	case DOCUMENT_FRAGMENT_NODE:
+		var child = node.firstChild;
+		while(child){
+			serializeToString(child, buf, isHTML, nodeFilter, visibleNamespaces.slice());
+			child = child.nextSibling;
+		}
+		return;
+	case ATTRIBUTE_NODE:
+		return addSerializedAttribute(buf, node.name, node.value);
+	case TEXT_NODE:
+		/**
+		 * The ampersand character (&) and the left angle bracket (<) must not appear in their literal form,
+		 * except when used as markup delimiters, or within a comment, a processing instruction, or a CDATA section.
+		 * If they are needed elsewhere, they must be escaped using either numeric character references or the strings
+		 * `&amp;` and `&lt;` respectively.
+		 * The right angle bracket (>) may be represented using the string " &gt; ", and must, for compatibility,
+		 * be escaped using either `&gt;` or a character reference when it appears in the string `]]>` in content,
+		 * when that string is not marking the end of a CDATA section.
+		 *
+		 * In the content of elements, character data is any string of characters
+		 * which does not contain the start-delimiter of any markup
+		 * and does not include the CDATA-section-close delimiter, `]]>`.
+		 *
+		 * @see https://www.w3.org/TR/xml/#NT-CharData
+		 */
+		return buf.push(node.data
+			.replace(/[<&]/g,_xmlEncoder)
+			.replace(/]]>/g, ']]&gt;')
+		);
+	case CDATA_SECTION_NODE:
+		return buf.push( '<![CDATA[',node.data,']]>');
+	case COMMENT_NODE:
+		return buf.push( "<!--",node.data,"-->");
+	case DOCUMENT_TYPE_NODE:
+		var pubid = node.publicId;
+		var sysid = node.systemId;
+		buf.push('<!DOCTYPE ',node.name);
+		if(pubid){
+			buf.push(' PUBLIC ', pubid);
+			if (sysid && sysid!='.') {
+				buf.push(' ', sysid);
+			}
+			buf.push('>');
+		}else if(sysid && sysid!='.'){
+			buf.push(' SYSTEM ', sysid, '>');
+		}else{
+			var sub = node.internalSubset;
+			if(sub){
+				buf.push(" [",sub,"]");
+			}
+			buf.push(">");
+		}
+		return;
+	case PROCESSING_INSTRUCTION_NODE:
+		return buf.push( "<?",node.target," ",node.data,"?>");
+	case ENTITY_REFERENCE_NODE:
+		return buf.push( '&',node.nodeName,';');
+	//case ENTITY_NODE:
+	//case NOTATION_NODE:
+	default:
+		buf.push('??',node.nodeName);
+	}
+}
+function importNode(doc,node,deep){
+	var node2;
+	switch (node.nodeType) {
+	case ELEMENT_NODE:
+		node2 = node.cloneNode(false);
+		node2.ownerDocument = doc;
+		//var attrs = node2.attributes;
+		//var len = attrs.length;
+		//for(var i=0;i<len;i++){
+			//node2.setAttributeNodeNS(importNode(doc,attrs.item(i),deep));
+		//}
+	case DOCUMENT_FRAGMENT_NODE:
+		break;
+	case ATTRIBUTE_NODE:
+		deep = true;
+		break;
+	//case ENTITY_REFERENCE_NODE:
+	//case PROCESSING_INSTRUCTION_NODE:
+	////case TEXT_NODE:
+	//case CDATA_SECTION_NODE:
+	//case COMMENT_NODE:
+	//	deep = false;
+	//	break;
+	//case DOCUMENT_NODE:
+	//case DOCUMENT_TYPE_NODE:
+	//cannot be imported.
+	//case ENTITY_NODE:
+	//case NOTATION_NODE：
+	//can not hit in level3
+	//default:throw e;
+	}
+	if(!node2){
+		node2 = node.cloneNode(false);//false
+	}
+	node2.ownerDocument = doc;
+	node2.parentNode = null;
+	if(deep){
+		var child = node.firstChild;
+		while(child){
+			node2.appendChild(importNode(doc,child,deep));
+			child = child.nextSibling;
+		}
+	}
+	return node2;
+}
+//
+//var _relationMap = {firstChild:1,lastChild:1,previousSibling:1,nextSibling:1,
+//					attributes:1,childNodes:1,parentNode:1,documentElement:1,doctype,};
+function cloneNode(doc,node,deep){
+	var node2 = new node.constructor();
+	for(var n in node){
+		var v = node[n];
+		if(typeof v != 'object' ){
+			if(v != node2[n]){
+				node2[n] = v;
+			}
+		}
+	}
+	if(node.childNodes){
+		node2.childNodes = new NodeList();
+	}
+	node2.ownerDocument = doc;
+	switch (node2.nodeType) {
+	case ELEMENT_NODE:
+		var attrs	= node.attributes;
+		var attrs2	= node2.attributes = new NamedNodeMap();
+		var len = attrs.length
+		attrs2._ownerElement = node2;
+		for(var i=0;i<len;i++){
+			node2.setAttributeNode(cloneNode(doc,attrs.item(i),true));
+		}
+		break;;
+	case ATTRIBUTE_NODE:
+		deep = true;
+	}
+	if(deep){
+		var child = node.firstChild;
+		while(child){
+			node2.appendChild(cloneNode(doc,child,deep));
+			child = child.nextSibling;
+		}
+	}
+	return node2;
+}
+
+function __set__(object,key,value){
+	object[key] = value
+}
+//do dynamic
+try{
+	if(Object.defineProperty){
+		Object.defineProperty(LiveNodeList.prototype,'length',{
+			get:function(){
+				_updateLiveList(this);
+				return this.$$length;
+			}
+		});
+
+		Object.defineProperty(Node.prototype,'textContent',{
+			get:function(){
+				return getTextContent(this);
+			},
+
+			set:function(data){
+				switch(this.nodeType){
+				case ELEMENT_NODE:
+				case DOCUMENT_FRAGMENT_NODE:
+					while(this.firstChild){
+						this.removeChild(this.firstChild);
+					}
+					if(data || String(data)){
+						this.appendChild(this.ownerDocument.createTextNode(data));
+					}
+					break;
+
+				default:
+					this.data = data;
+					this.value = data;
+					this.nodeValue = data;
+				}
+			}
+		})
+		
+		function getTextContent(node){
+			switch(node.nodeType){
+			case ELEMENT_NODE:
+			case DOCUMENT_FRAGMENT_NODE:
+				var buf = [];
+				node = node.firstChild;
+				while(node){
+					if(node.nodeType!==7 && node.nodeType !==8){
+						buf.push(getTextContent(node));
+					}
+					node = node.nextSibling;
+				}
+				return buf.join('');
+			default:
+				return node.nodeValue;
+			}
+		}
+
+		__set__ = function(object,key,value){
+			//console.log(value)
+			object['$$'+key] = value
+		}
+	}
+}catch(e){//ie8
+}
+
+//if(typeof require == 'function'){
+	exports.DocumentType = DocumentType;
+	exports.DOMException = DOMException;
+	exports.DOMImplementation = DOMImplementation;
+	exports.Element = Element;
+	exports.Node = Node;
+	exports.NodeList = NodeList;
+	exports.XMLSerializer = XMLSerializer;
+//}
 
 
 /***/ }),
@@ -13267,10 +14914,34 @@ exports.FetchError = FetchError;
 
 /***/ }),
 
-/***/ 507:
-/***/ (function(__unusedmodule, exports) {
+/***/ 508:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
 
-exports.entityMap = {
+var freeze = __webpack_require__(756).freeze;
+
+/**
+ * The entities that are predefined in every XML document.
+ *
+ * @see https://www.w3.org/TR/2006/REC-xml11-20060816/#sec-predefined-ent W3C XML 1.1
+ * @see https://www.w3.org/TR/2008/REC-xml-20081126/#sec-predefined-ent W3C XML 1.0
+ * @see https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#Predefined_entities_in_XML Wikipedia
+ */
+exports.XML_ENTITIES = freeze({amp:'&', apos:"'", gt:'>', lt:'<', quot:'"'})
+
+/**
+ * A map of currently 241 entities that are detected in an HTML document.
+ * They contain all entries from `XML_ENTITIES`.
+ *
+ * @see XML_ENTITIES
+ * @see DOMParser.parseFromString
+ * @see DOMImplementation.prototype.createHTMLDocument
+ * @see https://html.spec.whatwg.org/#named-character-references WHATWG HTML(5) Spec
+ * @see https://www.w3.org/TR/xml-entity-names/ W3C XML Entity Names
+ * @see https://www.w3.org/TR/html4/sgml/entities.html W3C HTML4/SGML
+ * @see https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#Character_entity_references_in_HTML Wikipedia (HTML)
+ * @see https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#Entities_representing_special_characters_in_XHTML Wikpedia (XHTML)
+ */
+exports.HTML_ENTITIES = freeze({
        lt: '<',
        gt: '>',
        amp: '&',
@@ -13512,7 +15183,13 @@ exports.entityMap = {
        clubs: "♣",
        hearts: "♥",
        diams: "♦"
-};
+});
+
+/**
+ * @deprecated use `HTML_ENTITIES` instead
+ * @see HTML_ENTITIES
+ */
+exports.entityMap = exports.HTML_ENTITIES
 
 
 /***/ }),
@@ -13797,1296 +15474,6 @@ module.exports = [[[0,44],"disallowed_STD3_valid"],[[45,46],"valid"],[[47,47],"d
 /***/ (function(module, __unusedexports, __webpack_require__) {
 
 module.exports = __webpack_require__(618);
-
-/***/ }),
-
-/***/ 555:
-/***/ (function(__unusedmodule, exports) {
-
-function copy(src,dest){
-	for(var p in src){
-		dest[p] = src[p];
-	}
-}
-/**
-^\w+\.prototype\.([_\w]+)\s*=\s*((?:.*\{\s*?[\r\n][\s\S]*?^})|\S.*?(?=[;\r\n]));?
-^\w+\.prototype\.([_\w]+)\s*=\s*(\S.*?(?=[;\r\n]));?
- */
-function _extends(Class,Super){
-	var pt = Class.prototype;
-	if(!(pt instanceof Super)){
-		function t(){};
-		t.prototype = Super.prototype;
-		t = new t();
-		copy(pt,t);
-		Class.prototype = pt = t;
-	}
-	if(pt.constructor != Class){
-		if(typeof Class != 'function'){
-			console.error("unknow Class:"+Class)
-		}
-		pt.constructor = Class
-	}
-}
-var htmlns = 'http://www.w3.org/1999/xhtml' ;
-// Node Types
-var NodeType = {}
-var ELEMENT_NODE                = NodeType.ELEMENT_NODE                = 1;
-var ATTRIBUTE_NODE              = NodeType.ATTRIBUTE_NODE              = 2;
-var TEXT_NODE                   = NodeType.TEXT_NODE                   = 3;
-var CDATA_SECTION_NODE          = NodeType.CDATA_SECTION_NODE          = 4;
-var ENTITY_REFERENCE_NODE       = NodeType.ENTITY_REFERENCE_NODE       = 5;
-var ENTITY_NODE                 = NodeType.ENTITY_NODE                 = 6;
-var PROCESSING_INSTRUCTION_NODE = NodeType.PROCESSING_INSTRUCTION_NODE = 7;
-var COMMENT_NODE                = NodeType.COMMENT_NODE                = 8;
-var DOCUMENT_NODE               = NodeType.DOCUMENT_NODE               = 9;
-var DOCUMENT_TYPE_NODE          = NodeType.DOCUMENT_TYPE_NODE          = 10;
-var DOCUMENT_FRAGMENT_NODE      = NodeType.DOCUMENT_FRAGMENT_NODE      = 11;
-var NOTATION_NODE               = NodeType.NOTATION_NODE               = 12;
-
-// ExceptionCode
-var ExceptionCode = {}
-var ExceptionMessage = {};
-var INDEX_SIZE_ERR              = ExceptionCode.INDEX_SIZE_ERR              = ((ExceptionMessage[1]="Index size error"),1);
-var DOMSTRING_SIZE_ERR          = ExceptionCode.DOMSTRING_SIZE_ERR          = ((ExceptionMessage[2]="DOMString size error"),2);
-var HIERARCHY_REQUEST_ERR       = ExceptionCode.HIERARCHY_REQUEST_ERR       = ((ExceptionMessage[3]="Hierarchy request error"),3);
-var WRONG_DOCUMENT_ERR          = ExceptionCode.WRONG_DOCUMENT_ERR          = ((ExceptionMessage[4]="Wrong document"),4);
-var INVALID_CHARACTER_ERR       = ExceptionCode.INVALID_CHARACTER_ERR       = ((ExceptionMessage[5]="Invalid character"),5);
-var NO_DATA_ALLOWED_ERR         = ExceptionCode.NO_DATA_ALLOWED_ERR         = ((ExceptionMessage[6]="No data allowed"),6);
-var NO_MODIFICATION_ALLOWED_ERR = ExceptionCode.NO_MODIFICATION_ALLOWED_ERR = ((ExceptionMessage[7]="No modification allowed"),7);
-var NOT_FOUND_ERR               = ExceptionCode.NOT_FOUND_ERR               = ((ExceptionMessage[8]="Not found"),8);
-var NOT_SUPPORTED_ERR           = ExceptionCode.NOT_SUPPORTED_ERR           = ((ExceptionMessage[9]="Not supported"),9);
-var INUSE_ATTRIBUTE_ERR         = ExceptionCode.INUSE_ATTRIBUTE_ERR         = ((ExceptionMessage[10]="Attribute in use"),10);
-//level2
-var INVALID_STATE_ERR        	= ExceptionCode.INVALID_STATE_ERR        	= ((ExceptionMessage[11]="Invalid state"),11);
-var SYNTAX_ERR               	= ExceptionCode.SYNTAX_ERR               	= ((ExceptionMessage[12]="Syntax error"),12);
-var INVALID_MODIFICATION_ERR 	= ExceptionCode.INVALID_MODIFICATION_ERR 	= ((ExceptionMessage[13]="Invalid modification"),13);
-var NAMESPACE_ERR            	= ExceptionCode.NAMESPACE_ERR           	= ((ExceptionMessage[14]="Invalid namespace"),14);
-var INVALID_ACCESS_ERR       	= ExceptionCode.INVALID_ACCESS_ERR      	= ((ExceptionMessage[15]="Invalid access"),15);
-
-/**
- * DOM Level 2
- * Object DOMException
- * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/ecma-script-binding.html
- * @see http://www.w3.org/TR/REC-DOM-Level-1/ecma-script-language-binding.html
- */
-function DOMException(code, message) {
-	if(message instanceof Error){
-		var error = message;
-	}else{
-		error = this;
-		Error.call(this, ExceptionMessage[code]);
-		this.message = ExceptionMessage[code];
-		if(Error.captureStackTrace) Error.captureStackTrace(this, DOMException);
-	}
-	error.code = code;
-	if(message) this.message = this.message + ": " + message;
-	return error;
-};
-DOMException.prototype = Error.prototype;
-copy(ExceptionCode,DOMException)
-/**
- * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/core.html#ID-536297177
- * The NodeList interface provides the abstraction of an ordered collection of nodes, without defining or constraining how this collection is implemented. NodeList objects in the DOM are live.
- * The items in the NodeList are accessible via an integral index, starting from 0.
- */
-function NodeList() {
-};
-NodeList.prototype = {
-	/**
-	 * The number of nodes in the list. The range of valid child node indices is 0 to length-1 inclusive.
-	 * @standard level1
-	 */
-	length:0, 
-	/**
-	 * Returns the indexth item in the collection. If index is greater than or equal to the number of nodes in the list, this returns null.
-	 * @standard level1
-	 * @param index  unsigned long 
-	 *   Index into the collection.
-	 * @return Node
-	 * 	The node at the indexth position in the NodeList, or null if that is not a valid index. 
-	 */
-	item: function(index) {
-		return this[index] || null;
-	},
-	toString:function(isHTML,nodeFilter){
-		for(var buf = [], i = 0;i<this.length;i++){
-			serializeToString(this[i],buf,isHTML,nodeFilter);
-		}
-		return buf.join('');
-	}
-};
-function LiveNodeList(node,refresh){
-	this._node = node;
-	this._refresh = refresh
-	_updateLiveList(this);
-}
-function _updateLiveList(list){
-	var inc = list._node._inc || list._node.ownerDocument._inc;
-	if(list._inc != inc){
-		var ls = list._refresh(list._node);
-		//console.log(ls.length)
-		__set__(list,'length',ls.length);
-		copy(ls,list);
-		list._inc = inc;
-	}
-}
-LiveNodeList.prototype.item = function(i){
-	_updateLiveList(this);
-	return this[i];
-}
-
-_extends(LiveNodeList,NodeList);
-/**
- * 
- * Objects implementing the NamedNodeMap interface are used to represent collections of nodes that can be accessed by name. Note that NamedNodeMap does not inherit from NodeList; NamedNodeMaps are not maintained in any particular order. Objects contained in an object implementing NamedNodeMap may also be accessed by an ordinal index, but this is simply to allow convenient enumeration of the contents of a NamedNodeMap, and does not imply that the DOM specifies an order to these Nodes.
- * NamedNodeMap objects in the DOM are live.
- * used for attributes or DocumentType entities 
- */
-function NamedNodeMap() {
-};
-
-function _findNodeIndex(list,node){
-	var i = list.length;
-	while(i--){
-		if(list[i] === node){return i}
-	}
-}
-
-function _addNamedNode(el,list,newAttr,oldAttr){
-	if(oldAttr){
-		list[_findNodeIndex(list,oldAttr)] = newAttr;
-	}else{
-		list[list.length++] = newAttr;
-	}
-	if(el){
-		newAttr.ownerElement = el;
-		var doc = el.ownerDocument;
-		if(doc){
-			oldAttr && _onRemoveAttribute(doc,el,oldAttr);
-			_onAddAttribute(doc,el,newAttr);
-		}
-	}
-}
-function _removeNamedNode(el,list,attr){
-	//console.log('remove attr:'+attr)
-	var i = _findNodeIndex(list,attr);
-	if(i>=0){
-		var lastIndex = list.length-1
-		while(i<lastIndex){
-			list[i] = list[++i]
-		}
-		list.length = lastIndex;
-		if(el){
-			var doc = el.ownerDocument;
-			if(doc){
-				_onRemoveAttribute(doc,el,attr);
-				attr.ownerElement = null;
-			}
-		}
-	}else{
-		throw DOMException(NOT_FOUND_ERR,new Error(el.tagName+'@'+attr))
-	}
-}
-NamedNodeMap.prototype = {
-	length:0,
-	item:NodeList.prototype.item,
-	getNamedItem: function(key) {
-//		if(key.indexOf(':')>0 || key == 'xmlns'){
-//			return null;
-//		}
-		//console.log()
-		var i = this.length;
-		while(i--){
-			var attr = this[i];
-			//console.log(attr.nodeName,key)
-			if(attr.nodeName == key){
-				return attr;
-			}
-		}
-	},
-	setNamedItem: function(attr) {
-		var el = attr.ownerElement;
-		if(el && el!=this._ownerElement){
-			throw new DOMException(INUSE_ATTRIBUTE_ERR);
-		}
-		var oldAttr = this.getNamedItem(attr.nodeName);
-		_addNamedNode(this._ownerElement,this,attr,oldAttr);
-		return oldAttr;
-	},
-	/* returns Node */
-	setNamedItemNS: function(attr) {// raises: WRONG_DOCUMENT_ERR,NO_MODIFICATION_ALLOWED_ERR,INUSE_ATTRIBUTE_ERR
-		var el = attr.ownerElement, oldAttr;
-		if(el && el!=this._ownerElement){
-			throw new DOMException(INUSE_ATTRIBUTE_ERR);
-		}
-		oldAttr = this.getNamedItemNS(attr.namespaceURI,attr.localName);
-		_addNamedNode(this._ownerElement,this,attr,oldAttr);
-		return oldAttr;
-	},
-
-	/* returns Node */
-	removeNamedItem: function(key) {
-		var attr = this.getNamedItem(key);
-		_removeNamedNode(this._ownerElement,this,attr);
-		return attr;
-		
-		
-	},// raises: NOT_FOUND_ERR,NO_MODIFICATION_ALLOWED_ERR
-	
-	//for level2
-	removeNamedItemNS:function(namespaceURI,localName){
-		var attr = this.getNamedItemNS(namespaceURI,localName);
-		_removeNamedNode(this._ownerElement,this,attr);
-		return attr;
-	},
-	getNamedItemNS: function(namespaceURI, localName) {
-		var i = this.length;
-		while(i--){
-			var node = this[i];
-			if(node.localName == localName && node.namespaceURI == namespaceURI){
-				return node;
-			}
-		}
-		return null;
-	}
-};
-/**
- * @see http://www.w3.org/TR/REC-DOM-Level-1/level-one-core.html#ID-102161490
- */
-function DOMImplementation(/* Object */ features) {
-	this._features = {};
-	if (features) {
-		for (var feature in features) {
-			 this._features = features[feature];
-		}
-	}
-};
-
-DOMImplementation.prototype = {
-	hasFeature: function(/* string */ feature, /* string */ version) {
-		var versions = this._features[feature.toLowerCase()];
-		if (versions && (!version || version in versions)) {
-			return true;
-		} else {
-			return false;
-		}
-	},
-	// Introduced in DOM Level 2:
-	createDocument:function(namespaceURI,  qualifiedName, doctype){// raises:INVALID_CHARACTER_ERR,NAMESPACE_ERR,WRONG_DOCUMENT_ERR
-		var doc = new Document();
-		doc.implementation = this;
-		doc.childNodes = new NodeList();
-		doc.doctype = doctype;
-		if(doctype){
-			doc.appendChild(doctype);
-		}
-		if(qualifiedName){
-			var root = doc.createElementNS(namespaceURI,qualifiedName);
-			doc.appendChild(root);
-		}
-		return doc;
-	},
-	// Introduced in DOM Level 2:
-	createDocumentType:function(qualifiedName, publicId, systemId){// raises:INVALID_CHARACTER_ERR,NAMESPACE_ERR
-		var node = new DocumentType();
-		node.name = qualifiedName;
-		node.nodeName = qualifiedName;
-		node.publicId = publicId;
-		node.systemId = systemId;
-		// Introduced in DOM Level 2:
-		//readonly attribute DOMString        internalSubset;
-		
-		//TODO:..
-		//  readonly attribute NamedNodeMap     entities;
-		//  readonly attribute NamedNodeMap     notations;
-		return node;
-	}
-};
-
-
-/**
- * @see http://www.w3.org/TR/2000/REC-DOM-Level-2-Core-20001113/core.html#ID-1950641247
- */
-
-function Node() {
-};
-
-Node.prototype = {
-	firstChild : null,
-	lastChild : null,
-	previousSibling : null,
-	nextSibling : null,
-	attributes : null,
-	parentNode : null,
-	childNodes : null,
-	ownerDocument : null,
-	nodeValue : null,
-	namespaceURI : null,
-	prefix : null,
-	localName : null,
-	// Modified in DOM Level 2:
-	insertBefore:function(newChild, refChild){//raises 
-		return _insertBefore(this,newChild,refChild);
-	},
-	replaceChild:function(newChild, oldChild){//raises 
-		this.insertBefore(newChild,oldChild);
-		if(oldChild){
-			this.removeChild(oldChild);
-		}
-	},
-	removeChild:function(oldChild){
-		return _removeChild(this,oldChild);
-	},
-	appendChild:function(newChild){
-		return this.insertBefore(newChild,null);
-	},
-	hasChildNodes:function(){
-		return this.firstChild != null;
-	},
-	cloneNode:function(deep){
-		return cloneNode(this.ownerDocument||this,this,deep);
-	},
-	// Modified in DOM Level 2:
-	normalize:function(){
-		var child = this.firstChild;
-		while(child){
-			var next = child.nextSibling;
-			if(next && next.nodeType == TEXT_NODE && child.nodeType == TEXT_NODE){
-				this.removeChild(next);
-				child.appendData(next.data);
-			}else{
-				child.normalize();
-				child = next;
-			}
-		}
-	},
-  	// Introduced in DOM Level 2:
-	isSupported:function(feature, version){
-		return this.ownerDocument.implementation.hasFeature(feature,version);
-	},
-    // Introduced in DOM Level 2:
-    hasAttributes:function(){
-    	return this.attributes.length>0;
-    },
-    lookupPrefix:function(namespaceURI){
-    	var el = this;
-    	while(el){
-    		var map = el._nsMap;
-    		//console.dir(map)
-    		if(map){
-    			for(var n in map){
-    				if(map[n] == namespaceURI){
-    					return n;
-    				}
-    			}
-    		}
-    		el = el.nodeType == ATTRIBUTE_NODE?el.ownerDocument : el.parentNode;
-    	}
-    	return null;
-    },
-    // Introduced in DOM Level 3:
-    lookupNamespaceURI:function(prefix){
-    	var el = this;
-    	while(el){
-    		var map = el._nsMap;
-    		//console.dir(map)
-    		if(map){
-    			if(prefix in map){
-    				return map[prefix] ;
-    			}
-    		}
-    		el = el.nodeType == ATTRIBUTE_NODE?el.ownerDocument : el.parentNode;
-    	}
-    	return null;
-    },
-    // Introduced in DOM Level 3:
-    isDefaultNamespace:function(namespaceURI){
-    	var prefix = this.lookupPrefix(namespaceURI);
-    	return prefix == null;
-    }
-};
-
-
-function _xmlEncoder(c){
-	return c == '<' && '&lt;' ||
-         c == '>' && '&gt;' ||
-         c == '&' && '&amp;' ||
-         c == '"' && '&quot;' ||
-         '&#'+c.charCodeAt()+';'
-}
-
-
-copy(NodeType,Node);
-copy(NodeType,Node.prototype);
-
-/**
- * @param callback return true for continue,false for break
- * @return boolean true: break visit;
- */
-function _visitNode(node,callback){
-	if(callback(node)){
-		return true;
-	}
-	if(node = node.firstChild){
-		do{
-			if(_visitNode(node,callback)){return true}
-        }while(node=node.nextSibling)
-    }
-}
-
-
-
-function Document(){
-}
-function _onAddAttribute(doc,el,newAttr){
-	doc && doc._inc++;
-	var ns = newAttr.namespaceURI ;
-	if(ns == 'http://www.w3.org/2000/xmlns/'){
-		//update namespace
-		el._nsMap[newAttr.prefix?newAttr.localName:''] = newAttr.value
-	}
-}
-function _onRemoveAttribute(doc,el,newAttr,remove){
-	doc && doc._inc++;
-	var ns = newAttr.namespaceURI ;
-	if(ns == 'http://www.w3.org/2000/xmlns/'){
-		//update namespace
-		delete el._nsMap[newAttr.prefix?newAttr.localName:'']
-	}
-}
-function _onUpdateChild(doc,el,newChild){
-	if(doc && doc._inc){
-		doc._inc++;
-		//update childNodes
-		var cs = el.childNodes;
-		if(newChild){
-			cs[cs.length++] = newChild;
-		}else{
-			//console.log(1)
-			var child = el.firstChild;
-			var i = 0;
-			while(child){
-				cs[i++] = child;
-				child =child.nextSibling;
-			}
-			cs.length = i;
-		}
-	}
-}
-
-/**
- * attributes;
- * children;
- * 
- * writeable properties:
- * nodeValue,Attr:value,CharacterData:data
- * prefix
- */
-function _removeChild(parentNode,child){
-	var previous = child.previousSibling;
-	var next = child.nextSibling;
-	if(previous){
-		previous.nextSibling = next;
-	}else{
-		parentNode.firstChild = next
-	}
-	if(next){
-		next.previousSibling = previous;
-	}else{
-		parentNode.lastChild = previous;
-	}
-	_onUpdateChild(parentNode.ownerDocument,parentNode);
-	return child;
-}
-/**
- * preformance key(refChild == null)
- */
-function _insertBefore(parentNode,newChild,nextChild){
-	var cp = newChild.parentNode;
-	if(cp){
-		cp.removeChild(newChild);//remove and update
-	}
-	if(newChild.nodeType === DOCUMENT_FRAGMENT_NODE){
-		var newFirst = newChild.firstChild;
-		if (newFirst == null) {
-			return newChild;
-		}
-		var newLast = newChild.lastChild;
-	}else{
-		newFirst = newLast = newChild;
-	}
-	var pre = nextChild ? nextChild.previousSibling : parentNode.lastChild;
-
-	newFirst.previousSibling = pre;
-	newLast.nextSibling = nextChild;
-	
-	
-	if(pre){
-		pre.nextSibling = newFirst;
-	}else{
-		parentNode.firstChild = newFirst;
-	}
-	if(nextChild == null){
-		parentNode.lastChild = newLast;
-	}else{
-		nextChild.previousSibling = newLast;
-	}
-	do{
-		newFirst.parentNode = parentNode;
-	}while(newFirst !== newLast && (newFirst= newFirst.nextSibling))
-	_onUpdateChild(parentNode.ownerDocument||parentNode,parentNode);
-	//console.log(parentNode.lastChild.nextSibling == null)
-	if (newChild.nodeType == DOCUMENT_FRAGMENT_NODE) {
-		newChild.firstChild = newChild.lastChild = null;
-	}
-	return newChild;
-}
-function _appendSingleChild(parentNode,newChild){
-	var cp = newChild.parentNode;
-	if(cp){
-		var pre = parentNode.lastChild;
-		cp.removeChild(newChild);//remove and update
-		var pre = parentNode.lastChild;
-	}
-	var pre = parentNode.lastChild;
-	newChild.parentNode = parentNode;
-	newChild.previousSibling = pre;
-	newChild.nextSibling = null;
-	if(pre){
-		pre.nextSibling = newChild;
-	}else{
-		parentNode.firstChild = newChild;
-	}
-	parentNode.lastChild = newChild;
-	_onUpdateChild(parentNode.ownerDocument,parentNode,newChild);
-	return newChild;
-	//console.log("__aa",parentNode.lastChild.nextSibling == null)
-}
-Document.prototype = {
-	//implementation : null,
-	nodeName :  '#document',
-	nodeType :  DOCUMENT_NODE,
-	doctype :  null,
-	documentElement :  null,
-	_inc : 1,
-	
-	insertBefore :  function(newChild, refChild){//raises 
-		if(newChild.nodeType == DOCUMENT_FRAGMENT_NODE){
-			var child = newChild.firstChild;
-			while(child){
-				var next = child.nextSibling;
-				this.insertBefore(child,refChild);
-				child = next;
-			}
-			return newChild;
-		}
-		if(this.documentElement == null && newChild.nodeType == ELEMENT_NODE){
-			this.documentElement = newChild;
-		}
-		
-		return _insertBefore(this,newChild,refChild),(newChild.ownerDocument = this),newChild;
-	},
-	removeChild :  function(oldChild){
-		if(this.documentElement == oldChild){
-			this.documentElement = null;
-		}
-		return _removeChild(this,oldChild);
-	},
-	// Introduced in DOM Level 2:
-	importNode : function(importedNode,deep){
-		return importNode(this,importedNode,deep);
-	},
-	// Introduced in DOM Level 2:
-	getElementById :	function(id){
-		var rtv = null;
-		_visitNode(this.documentElement,function(node){
-			if(node.nodeType == ELEMENT_NODE){
-				if(node.getAttribute('id') == id){
-					rtv = node;
-					return true;
-				}
-			}
-		})
-		return rtv;
-	},
-	
-	getElementsByClassName: function(className) {
-		var pattern = new RegExp("(^|\\s)" + className + "(\\s|$)");
-		return new LiveNodeList(this, function(base) {
-			var ls = [];
-			_visitNode(base.documentElement, function(node) {
-				if(node !== base && node.nodeType == ELEMENT_NODE) {
-					if(pattern.test(node.getAttribute('class'))) {
-						ls.push(node);
-					}
-				}
-			});
-			return ls;
-		});
-	},
-	
-	//document factory method:
-	createElement :	function(tagName){
-		var node = new Element();
-		node.ownerDocument = this;
-		node.nodeName = tagName;
-		node.tagName = tagName;
-		node.childNodes = new NodeList();
-		var attrs	= node.attributes = new NamedNodeMap();
-		attrs._ownerElement = node;
-		return node;
-	},
-	createDocumentFragment :	function(){
-		var node = new DocumentFragment();
-		node.ownerDocument = this;
-		node.childNodes = new NodeList();
-		return node;
-	},
-	createTextNode :	function(data){
-		var node = new Text();
-		node.ownerDocument = this;
-		node.appendData(data)
-		return node;
-	},
-	createComment :	function(data){
-		var node = new Comment();
-		node.ownerDocument = this;
-		node.appendData(data)
-		return node;
-	},
-	createCDATASection :	function(data){
-		var node = new CDATASection();
-		node.ownerDocument = this;
-		node.appendData(data)
-		return node;
-	},
-	createProcessingInstruction :	function(target,data){
-		var node = new ProcessingInstruction();
-		node.ownerDocument = this;
-		node.tagName = node.target = target;
-		node.nodeValue= node.data = data;
-		return node;
-	},
-	createAttribute :	function(name){
-		var node = new Attr();
-		node.ownerDocument	= this;
-		node.name = name;
-		node.nodeName	= name;
-		node.localName = name;
-		node.specified = true;
-		return node;
-	},
-	createEntityReference :	function(name){
-		var node = new EntityReference();
-		node.ownerDocument	= this;
-		node.nodeName	= name;
-		return node;
-	},
-	// Introduced in DOM Level 2:
-	createElementNS :	function(namespaceURI,qualifiedName){
-		var node = new Element();
-		var pl = qualifiedName.split(':');
-		var attrs	= node.attributes = new NamedNodeMap();
-		node.childNodes = new NodeList();
-		node.ownerDocument = this;
-		node.nodeName = qualifiedName;
-		node.tagName = qualifiedName;
-		node.namespaceURI = namespaceURI;
-		if(pl.length == 2){
-			node.prefix = pl[0];
-			node.localName = pl[1];
-		}else{
-			//el.prefix = null;
-			node.localName = qualifiedName;
-		}
-		attrs._ownerElement = node;
-		return node;
-	},
-	// Introduced in DOM Level 2:
-	createAttributeNS :	function(namespaceURI,qualifiedName){
-		var node = new Attr();
-		var pl = qualifiedName.split(':');
-		node.ownerDocument = this;
-		node.nodeName = qualifiedName;
-		node.name = qualifiedName;
-		node.namespaceURI = namespaceURI;
-		node.specified = true;
-		if(pl.length == 2){
-			node.prefix = pl[0];
-			node.localName = pl[1];
-		}else{
-			//el.prefix = null;
-			node.localName = qualifiedName;
-		}
-		return node;
-	}
-};
-_extends(Document,Node);
-
-
-function Element() {
-	this._nsMap = {};
-};
-Element.prototype = {
-	nodeType : ELEMENT_NODE,
-	hasAttribute : function(name){
-		return this.getAttributeNode(name)!=null;
-	},
-	getAttribute : function(name){
-		var attr = this.getAttributeNode(name);
-		return attr && attr.value || '';
-	},
-	getAttributeNode : function(name){
-		return this.attributes.getNamedItem(name);
-	},
-	setAttribute : function(name, value){
-		var attr = this.ownerDocument.createAttribute(name);
-		attr.value = attr.nodeValue = "" + value;
-		this.setAttributeNode(attr)
-	},
-	removeAttribute : function(name){
-		var attr = this.getAttributeNode(name)
-		attr && this.removeAttributeNode(attr);
-	},
-	
-	//four real opeartion method
-	appendChild:function(newChild){
-		if(newChild.nodeType === DOCUMENT_FRAGMENT_NODE){
-			return this.insertBefore(newChild,null);
-		}else{
-			return _appendSingleChild(this,newChild);
-		}
-	},
-	setAttributeNode : function(newAttr){
-		return this.attributes.setNamedItem(newAttr);
-	},
-	setAttributeNodeNS : function(newAttr){
-		return this.attributes.setNamedItemNS(newAttr);
-	},
-	removeAttributeNode : function(oldAttr){
-		//console.log(this == oldAttr.ownerElement)
-		return this.attributes.removeNamedItem(oldAttr.nodeName);
-	},
-	//get real attribute name,and remove it by removeAttributeNode
-	removeAttributeNS : function(namespaceURI, localName){
-		var old = this.getAttributeNodeNS(namespaceURI, localName);
-		old && this.removeAttributeNode(old);
-	},
-	
-	hasAttributeNS : function(namespaceURI, localName){
-		return this.getAttributeNodeNS(namespaceURI, localName)!=null;
-	},
-	getAttributeNS : function(namespaceURI, localName){
-		var attr = this.getAttributeNodeNS(namespaceURI, localName);
-		return attr && attr.value || '';
-	},
-	setAttributeNS : function(namespaceURI, qualifiedName, value){
-		var attr = this.ownerDocument.createAttributeNS(namespaceURI, qualifiedName);
-		attr.value = attr.nodeValue = "" + value;
-		this.setAttributeNode(attr)
-	},
-	getAttributeNodeNS : function(namespaceURI, localName){
-		return this.attributes.getNamedItemNS(namespaceURI, localName);
-	},
-	
-	getElementsByTagName : function(tagName){
-		return new LiveNodeList(this,function(base){
-			var ls = [];
-			_visitNode(base,function(node){
-				if(node !== base && node.nodeType == ELEMENT_NODE && (tagName === '*' || node.tagName == tagName)){
-					ls.push(node);
-				}
-			});
-			return ls;
-		});
-	},
-	getElementsByTagNameNS : function(namespaceURI, localName){
-		return new LiveNodeList(this,function(base){
-			var ls = [];
-			_visitNode(base,function(node){
-				if(node !== base && node.nodeType === ELEMENT_NODE && (namespaceURI === '*' || node.namespaceURI === namespaceURI) && (localName === '*' || node.localName == localName)){
-					ls.push(node);
-				}
-			});
-			return ls;
-			
-		});
-	}
-};
-Document.prototype.getElementsByTagName = Element.prototype.getElementsByTagName;
-Document.prototype.getElementsByTagNameNS = Element.prototype.getElementsByTagNameNS;
-
-
-_extends(Element,Node);
-function Attr() {
-};
-Attr.prototype.nodeType = ATTRIBUTE_NODE;
-_extends(Attr,Node);
-
-
-function CharacterData() {
-};
-CharacterData.prototype = {
-	data : '',
-	substringData : function(offset, count) {
-		return this.data.substring(offset, offset+count);
-	},
-	appendData: function(text) {
-		text = this.data+text;
-		this.nodeValue = this.data = text;
-		this.length = text.length;
-	},
-	insertData: function(offset,text) {
-		this.replaceData(offset,0,text);
-	
-	},
-	appendChild:function(newChild){
-		throw new Error(ExceptionMessage[HIERARCHY_REQUEST_ERR])
-	},
-	deleteData: function(offset, count) {
-		this.replaceData(offset,count,"");
-	},
-	replaceData: function(offset, count, text) {
-		var start = this.data.substring(0,offset);
-		var end = this.data.substring(offset+count);
-		text = start + text + end;
-		this.nodeValue = this.data = text;
-		this.length = text.length;
-	}
-}
-_extends(CharacterData,Node);
-function Text() {
-};
-Text.prototype = {
-	nodeName : "#text",
-	nodeType : TEXT_NODE,
-	splitText : function(offset) {
-		var text = this.data;
-		var newText = text.substring(offset);
-		text = text.substring(0, offset);
-		this.data = this.nodeValue = text;
-		this.length = text.length;
-		var newNode = this.ownerDocument.createTextNode(newText);
-		if(this.parentNode){
-			this.parentNode.insertBefore(newNode, this.nextSibling);
-		}
-		return newNode;
-	}
-}
-_extends(Text,CharacterData);
-function Comment() {
-};
-Comment.prototype = {
-	nodeName : "#comment",
-	nodeType : COMMENT_NODE
-}
-_extends(Comment,CharacterData);
-
-function CDATASection() {
-};
-CDATASection.prototype = {
-	nodeName : "#cdata-section",
-	nodeType : CDATA_SECTION_NODE
-}
-_extends(CDATASection,CharacterData);
-
-
-function DocumentType() {
-};
-DocumentType.prototype.nodeType = DOCUMENT_TYPE_NODE;
-_extends(DocumentType,Node);
-
-function Notation() {
-};
-Notation.prototype.nodeType = NOTATION_NODE;
-_extends(Notation,Node);
-
-function Entity() {
-};
-Entity.prototype.nodeType = ENTITY_NODE;
-_extends(Entity,Node);
-
-function EntityReference() {
-};
-EntityReference.prototype.nodeType = ENTITY_REFERENCE_NODE;
-_extends(EntityReference,Node);
-
-function DocumentFragment() {
-};
-DocumentFragment.prototype.nodeName =	"#document-fragment";
-DocumentFragment.prototype.nodeType =	DOCUMENT_FRAGMENT_NODE;
-_extends(DocumentFragment,Node);
-
-
-function ProcessingInstruction() {
-}
-ProcessingInstruction.prototype.nodeType = PROCESSING_INSTRUCTION_NODE;
-_extends(ProcessingInstruction,Node);
-function XMLSerializer(){}
-XMLSerializer.prototype.serializeToString = function(node,isHtml,nodeFilter){
-	return nodeSerializeToString.call(node,isHtml,nodeFilter);
-}
-Node.prototype.toString = nodeSerializeToString;
-function nodeSerializeToString(isHtml,nodeFilter){
-	var buf = [];
-	var refNode = this.nodeType == 9 && this.documentElement || this;
-	var prefix = refNode.prefix;
-	var uri = refNode.namespaceURI;
-	
-	if(uri && prefix == null){
-		//console.log(prefix)
-		var prefix = refNode.lookupPrefix(uri);
-		if(prefix == null){
-			//isHTML = true;
-			var visibleNamespaces=[
-			{namespace:uri,prefix:null}
-			//{namespace:uri,prefix:''}
-			]
-		}
-	}
-	serializeToString(this,buf,isHtml,nodeFilter,visibleNamespaces);
-	//console.log('###',this.nodeType,uri,prefix,buf.join(''))
-	return buf.join('');
-}
-function needNamespaceDefine(node,isHTML, visibleNamespaces) {
-	var prefix = node.prefix||'';
-	var uri = node.namespaceURI;
-	if (!prefix && !uri){
-		return false;
-	}
-	if (prefix === "xml" && uri === "http://www.w3.org/XML/1998/namespace" 
-		|| uri == 'http://www.w3.org/2000/xmlns/'){
-		return false;
-	}
-	
-	var i = visibleNamespaces.length 
-	//console.log('@@@@',node.tagName,prefix,uri,visibleNamespaces)
-	while (i--) {
-		var ns = visibleNamespaces[i];
-		// get namespace prefix
-		//console.log(node.nodeType,node.tagName,ns.prefix,prefix)
-		if (ns.prefix == prefix){
-			return ns.namespace != uri;
-		}
-	}
-	//console.log(isHTML,uri,prefix=='')
-	//if(isHTML && prefix ==null && uri == 'http://www.w3.org/1999/xhtml'){
-	//	return false;
-	//}
-	//node.flag = '11111'
-	//console.error(3,true,node.flag,node.prefix,node.namespaceURI)
-	return true;
-}
-function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
-	if(nodeFilter){
-		node = nodeFilter(node);
-		if(node){
-			if(typeof node == 'string'){
-				buf.push(node);
-				return;
-			}
-		}else{
-			return;
-		}
-		//buf.sort.apply(attrs, attributeSorter);
-	}
-	switch(node.nodeType){
-	case ELEMENT_NODE:
-		if (!visibleNamespaces) visibleNamespaces = [];
-		var startVisibleNamespaces = visibleNamespaces.length;
-		var attrs = node.attributes;
-		var len = attrs.length;
-		var child = node.firstChild;
-		var nodeName = node.tagName;
-		
-		isHTML =  (htmlns === node.namespaceURI) ||isHTML 
-		buf.push('<',nodeName);
-		
-		
-		
-		for(var i=0;i<len;i++){
-			// add namespaces for attributes
-			var attr = attrs.item(i);
-			if (attr.prefix == 'xmlns') {
-				visibleNamespaces.push({ prefix: attr.localName, namespace: attr.value });
-			}else if(attr.nodeName == 'xmlns'){
-				visibleNamespaces.push({ prefix: '', namespace: attr.value });
-			}
-		}
-		for(var i=0;i<len;i++){
-			var attr = attrs.item(i);
-			if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
-				var prefix = attr.prefix||'';
-				var uri = attr.namespaceURI;
-				var ns = prefix ? ' xmlns:' + prefix : " xmlns";
-				buf.push(ns, '="' , uri , '"');
-				visibleNamespaces.push({ prefix: prefix, namespace:uri });
-			}
-			serializeToString(attr,buf,isHTML,nodeFilter,visibleNamespaces);
-		}
-		// add namespace for current node		
-		if (needNamespaceDefine(node,isHTML, visibleNamespaces)) {
-			var prefix = node.prefix||'';
-			var uri = node.namespaceURI;
-			if (uri) {
-				// Avoid empty namespace value like xmlns:ds=""
-				// Empty namespace URL will we produce an invalid XML document
-				var ns = prefix ? ' xmlns:' + prefix : " xmlns";
-				buf.push(ns, '="' , uri , '"');
-				visibleNamespaces.push({ prefix: prefix, namespace:uri });
-			}
-		}
-		
-		if(child || isHTML && !/^(?:meta|link|img|br|hr|input)$/i.test(nodeName)){
-			buf.push('>');
-			//if is cdata child node
-			if(isHTML && /^script$/i.test(nodeName)){
-				while(child){
-					if(child.data){
-						buf.push(child.data);
-					}else{
-						serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces);
-					}
-					child = child.nextSibling;
-				}
-			}else
-			{
-				while(child){
-					serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces);
-					child = child.nextSibling;
-				}
-			}
-			buf.push('</',nodeName,'>');
-		}else{
-			buf.push('/>');
-		}
-		// remove added visible namespaces
-		//visibleNamespaces.length = startVisibleNamespaces;
-		return;
-	case DOCUMENT_NODE:
-	case DOCUMENT_FRAGMENT_NODE:
-		var child = node.firstChild;
-		while(child){
-			serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces);
-			child = child.nextSibling;
-		}
-		return;
-	case ATTRIBUTE_NODE:
-		/**
-		 * Well-formedness constraint: No < in Attribute Values
-		 * The replacement text of any entity referred to directly or indirectly in an attribute value must not contain a <.
-		 * @see https://www.w3.org/TR/xml/#CleanAttrVals
-		 * @see https://www.w3.org/TR/xml/#NT-AttValue
-		 */
-		return buf.push(' ', node.name, '="', node.value.replace(/[<&"]/g,_xmlEncoder), '"');
-	case TEXT_NODE:
-		/**
-		 * The ampersand character (&) and the left angle bracket (<) must not appear in their literal form,
-		 * except when used as markup delimiters, or within a comment, a processing instruction, or a CDATA section.
-		 * If they are needed elsewhere, they must be escaped using either numeric character references or the strings
-		 * `&amp;` and `&lt;` respectively.
-		 * The right angle bracket (>) may be represented using the string " &gt; ", and must, for compatibility,
-		 * be escaped using either `&gt;` or a character reference when it appears in the string `]]>` in content,
-		 * when that string is not marking the end of a CDATA section.
-		 *
-		 * In the content of elements, character data is any string of characters
-		 * which does not contain the start-delimiter of any markup
-		 * and does not include the CDATA-section-close delimiter, `]]>`.
-		 *
-		 * @see https://www.w3.org/TR/xml/#NT-CharData
-		 */
-		return buf.push(node.data
-			.replace(/[<&]/g,_xmlEncoder)
-			.replace(/]]>/g, ']]&gt;')
-		);
-	case CDATA_SECTION_NODE:
-		return buf.push( '<![CDATA[',node.data,']]>');
-	case COMMENT_NODE:
-		return buf.push( "<!--",node.data,"-->");
-	case DOCUMENT_TYPE_NODE:
-		var pubid = node.publicId;
-		var sysid = node.systemId;
-		buf.push('<!DOCTYPE ',node.name);
-		if(pubid){
-			buf.push(' PUBLIC ', pubid);
-			if (sysid && sysid!='.') {
-				buf.push(' ', sysid);
-			}
-			buf.push('>');
-		}else if(sysid && sysid!='.'){
-			buf.push(' SYSTEM ', sysid, '>');
-		}else{
-			var sub = node.internalSubset;
-			if(sub){
-				buf.push(" [",sub,"]");
-			}
-			buf.push(">");
-		}
-		return;
-	case PROCESSING_INSTRUCTION_NODE:
-		return buf.push( "<?",node.target," ",node.data,"?>");
-	case ENTITY_REFERENCE_NODE:
-		return buf.push( '&',node.nodeName,';');
-	//case ENTITY_NODE:
-	//case NOTATION_NODE:
-	default:
-		buf.push('??',node.nodeName);
-	}
-}
-function importNode(doc,node,deep){
-	var node2;
-	switch (node.nodeType) {
-	case ELEMENT_NODE:
-		node2 = node.cloneNode(false);
-		node2.ownerDocument = doc;
-		//var attrs = node2.attributes;
-		//var len = attrs.length;
-		//for(var i=0;i<len;i++){
-			//node2.setAttributeNodeNS(importNode(doc,attrs.item(i),deep));
-		//}
-	case DOCUMENT_FRAGMENT_NODE:
-		break;
-	case ATTRIBUTE_NODE:
-		deep = true;
-		break;
-	//case ENTITY_REFERENCE_NODE:
-	//case PROCESSING_INSTRUCTION_NODE:
-	////case TEXT_NODE:
-	//case CDATA_SECTION_NODE:
-	//case COMMENT_NODE:
-	//	deep = false;
-	//	break;
-	//case DOCUMENT_NODE:
-	//case DOCUMENT_TYPE_NODE:
-	//cannot be imported.
-	//case ENTITY_NODE:
-	//case NOTATION_NODE：
-	//can not hit in level3
-	//default:throw e;
-	}
-	if(!node2){
-		node2 = node.cloneNode(false);//false
-	}
-	node2.ownerDocument = doc;
-	node2.parentNode = null;
-	if(deep){
-		var child = node.firstChild;
-		while(child){
-			node2.appendChild(importNode(doc,child,deep));
-			child = child.nextSibling;
-		}
-	}
-	return node2;
-}
-//
-//var _relationMap = {firstChild:1,lastChild:1,previousSibling:1,nextSibling:1,
-//					attributes:1,childNodes:1,parentNode:1,documentElement:1,doctype,};
-function cloneNode(doc,node,deep){
-	var node2 = new node.constructor();
-	for(var n in node){
-		var v = node[n];
-		if(typeof v != 'object' ){
-			if(v != node2[n]){
-				node2[n] = v;
-			}
-		}
-	}
-	if(node.childNodes){
-		node2.childNodes = new NodeList();
-	}
-	node2.ownerDocument = doc;
-	switch (node2.nodeType) {
-	case ELEMENT_NODE:
-		var attrs	= node.attributes;
-		var attrs2	= node2.attributes = new NamedNodeMap();
-		var len = attrs.length
-		attrs2._ownerElement = node2;
-		for(var i=0;i<len;i++){
-			node2.setAttributeNode(cloneNode(doc,attrs.item(i),true));
-		}
-		break;;
-	case ATTRIBUTE_NODE:
-		deep = true;
-	}
-	if(deep){
-		var child = node.firstChild;
-		while(child){
-			node2.appendChild(cloneNode(doc,child,deep));
-			child = child.nextSibling;
-		}
-	}
-	return node2;
-}
-
-function __set__(object,key,value){
-	object[key] = value
-}
-//do dynamic
-try{
-	if(Object.defineProperty){
-		Object.defineProperty(LiveNodeList.prototype,'length',{
-			get:function(){
-				_updateLiveList(this);
-				return this.$$length;
-			}
-		});
-		Object.defineProperty(Node.prototype,'textContent',{
-			get:function(){
-				return getTextContent(this);
-			},
-			set:function(data){
-				switch(this.nodeType){
-				case ELEMENT_NODE:
-				case DOCUMENT_FRAGMENT_NODE:
-					while(this.firstChild){
-						this.removeChild(this.firstChild);
-					}
-					if(data || String(data)){
-						this.appendChild(this.ownerDocument.createTextNode(data));
-					}
-					break;
-				default:
-					//TODO:
-					this.data = data;
-					this.value = data;
-					this.nodeValue = data;
-				}
-			}
-		})
-		
-		function getTextContent(node){
-			switch(node.nodeType){
-			case ELEMENT_NODE:
-			case DOCUMENT_FRAGMENT_NODE:
-				var buf = [];
-				node = node.firstChild;
-				while(node){
-					if(node.nodeType!==7 && node.nodeType !==8){
-						buf.push(getTextContent(node));
-					}
-					node = node.nextSibling;
-				}
-				return buf.join('');
-			default:
-				return node.nodeValue;
-			}
-		}
-		__set__ = function(object,key,value){
-			//console.log(value)
-			object['$$'+key] = value
-		}
-	}
-}catch(e){//ie8
-}
-
-//if(typeof require == 'function'){
-	exports.Node = Node;
-	exports.DOMException = DOMException;
-	exports.DOMImplementation = DOMImplementation;
-	exports.XMLSerializer = XMLSerializer;
-//}
-
 
 /***/ }),
 
@@ -16388,6 +16775,158 @@ exports.issueCommand = issueCommand;
 /***/ (function(module) {
 
 module.exports = require("fs");
+
+/***/ }),
+
+/***/ 756:
+/***/ (function(__unusedmodule, exports) {
+
+"use strict";
+
+
+/**
+ * "Shallow freezes" an object to render it immutable.
+ * Uses `Object.freeze` if available,
+ * otherwise the immutability is only in the type.
+ *
+ * Is used to create "enum like" objects.
+ *
+ * @template T
+ * @param {T} object the object to freeze
+ * @param {Pick<ObjectConstructor, 'freeze'> = Object} oc `Object` by default,
+ * 				allows to inject custom object constructor for tests
+ * @returns {Readonly<T>}
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/freeze
+ */
+function freeze(object, oc) {
+	if (oc === undefined) {
+		oc = Object
+	}
+	return oc && typeof oc.freeze === 'function' ? oc.freeze(object) : object
+}
+
+/**
+ * All mime types that are allowed as input to `DOMParser.parseFromString`
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMParser/parseFromString#Argument02 MDN
+ * @see https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#domparsersupportedtype WHATWG HTML Spec
+ * @see DOMParser.prototype.parseFromString
+ */
+var MIME_TYPE = freeze({
+	/**
+	 * `text/html`, the only mime type that triggers treating an XML document as HTML.
+	 *
+	 * @see DOMParser.SupportedType.isHTML
+	 * @see https://www.iana.org/assignments/media-types/text/html IANA MimeType registration
+	 * @see https://en.wikipedia.org/wiki/HTML Wikipedia
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMParser/parseFromString MDN
+	 * @see https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-domparser-parsefromstring WHATWG HTML Spec
+	 */
+	HTML: 'text/html',
+
+	/**
+	 * Helper method to check a mime type if it indicates an HTML document
+	 *
+	 * @param {string} [value]
+	 * @returns {boolean}
+	 *
+	 * @see https://www.iana.org/assignments/media-types/text/html IANA MimeType registration
+	 * @see https://en.wikipedia.org/wiki/HTML Wikipedia
+	 * @see https://developer.mozilla.org/en-US/docs/Web/API/DOMParser/parseFromString MDN
+	 * @see https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-domparser-parsefromstring 	 */
+	isHTML: function (value) {
+		return value === MIME_TYPE.HTML
+	},
+
+	/**
+	 * `application/xml`, the standard mime type for XML documents.
+	 *
+	 * @see https://www.iana.org/assignments/media-types/application/xml IANA MimeType registration
+	 * @see https://tools.ietf.org/html/rfc7303#section-9.1 RFC 7303
+	 * @see https://en.wikipedia.org/wiki/XML_and_MIME Wikipedia
+	 */
+	XML_APPLICATION: 'application/xml',
+
+	/**
+	 * `text/html`, an alias for `application/xml`.
+	 *
+	 * @see https://tools.ietf.org/html/rfc7303#section-9.2 RFC 7303
+	 * @see https://www.iana.org/assignments/media-types/text/xml IANA MimeType registration
+	 * @see https://en.wikipedia.org/wiki/XML_and_MIME Wikipedia
+	 */
+	XML_TEXT: 'text/xml',
+
+	/**
+	 * `application/xhtml+xml`, indicates an XML document that has the default HTML namespace,
+	 * but is parsed as an XML document.
+	 *
+	 * @see https://www.iana.org/assignments/media-types/application/xhtml+xml IANA MimeType registration
+	 * @see https://dom.spec.whatwg.org/#dom-domimplementation-createdocument WHATWG DOM Spec
+	 * @see https://en.wikipedia.org/wiki/XHTML Wikipedia
+	 */
+	XML_XHTML_APPLICATION: 'application/xhtml+xml',
+
+	/**
+	 * `image/svg+xml`,
+	 *
+	 * @see https://www.iana.org/assignments/media-types/image/svg+xml IANA MimeType registration
+	 * @see https://www.w3.org/TR/SVG11/ W3C SVG 1.1
+	 * @see https://en.wikipedia.org/wiki/Scalable_Vector_Graphics Wikipedia
+	 */
+	XML_SVG_IMAGE: 'image/svg+xml',
+})
+
+/**
+ * Namespaces that are used in this code base.
+ *
+ * @see http://www.w3.org/TR/REC-xml-names
+ */
+var NAMESPACE = freeze({
+	/**
+	 * The XHTML namespace.
+	 *
+	 * @see http://www.w3.org/1999/xhtml
+	 */
+	HTML: 'http://www.w3.org/1999/xhtml',
+
+	/**
+	 * Checks if `uri` equals `NAMESPACE.HTML`.
+	 *
+	 * @param {string} [uri]
+	 *
+	 * @see NAMESPACE.HTML
+	 */
+	isHTML: function (uri) {
+		return uri === NAMESPACE.HTML
+	},
+
+	/**
+	 * The SVG namespace.
+	 *
+	 * @see http://www.w3.org/2000/svg
+	 */
+	SVG: 'http://www.w3.org/2000/svg',
+
+	/**
+	 * The `xml:` namespace.
+	 *
+	 * @see http://www.w3.org/XML/1998/namespace
+	 */
+	XML: 'http://www.w3.org/XML/1998/namespace',
+
+	/**
+	 * The `xmlns:` namespace
+	 *
+	 * @see https://www.w3.org/2000/xmlns/
+	 */
+	XMLNS: 'http://www.w3.org/2000/xmlns/',
+})
+
+exports.freeze = freeze;
+exports.MIME_TYPE = MIME_TYPE;
+exports.NAMESPACE = NAMESPACE;
+
 
 /***/ }),
 

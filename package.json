@@ -24,7 +24,7 @@
 	"homepage": "https://github.com/huddly/lunsjkollektivet-menu-slack-action#readme",
 	"dependencies": {
 		"@actions/core": "^1.2.6",
-		"@translate-tools/core": "^0.2.6",
+		"@translate-tools/core": "^0.2.8",
 		"dotenv": "^16.0.0",
 		"node-fetch": "^2.6.7"
 	},
